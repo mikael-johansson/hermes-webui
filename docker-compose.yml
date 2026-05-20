@@ -16,8 +16,8 @@ services:
     build: .
     ports:
     # select only one; use 127.0.0.1 version to expose to localhost only
-      - "127.0.0.1:8787:8787"
-#      - "8787:8787"
+#      - "127.0.0.1:8787:8787"
+      - "8787:8787"
     volumes:
       # Mount your Hermes home directory into the container.
       # The default (${HOME}/.hermes) works on both macOS (/Users/<you>/.hermes)
@@ -26,7 +26,7 @@ services:
       # macOS note: set UID and GID below to match your user ID (run `id -u` and `id -g`).
       - ${HERMES_HOME:-${HOME}/.hermes}:/home/hermeswebui/.hermes
       # Your workspace directory shown on first launch (adapt if yours is different, the container will use the mounted /workspace)
-      - ${HERMES_WORKSPACE:-${HOME}/workspace}:/workspace
+      - ${HERMES_WORKSPACE:-${HOME}/webui}:/workspace
     environment:
       # Set to your host user ID: run `id -u` and `id -g` to find them.
       # On macOS, UIDs start at 501 (not 1000), so set UID and GID in a .env file:

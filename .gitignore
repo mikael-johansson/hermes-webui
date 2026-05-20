@@ -13,7 +13,7 @@ __pycache__/
 archive/
 
 # Local environment and secrets (but keep the example templates)
-.env
+### .env ########## MICKE
 .env.*
 !.env.example
 !.env.docker.example
