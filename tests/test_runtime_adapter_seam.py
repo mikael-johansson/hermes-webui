@@ -26,7 +26,63 @@ def test_runtime_adapter_interface_and_legacy_journal_methods_exist():
     assert runtime.runtime_adapter_enabled({}) is False
     assert runtime.runtime_adapter_mode({"HERMES_WEBUI_RUNTIME_ADAPTER": "legacy-journal"}) == "legacy-journal"
     assert runtime.runtime_adapter_enabled({"HERMES_WEBUI_RUNTIME_ADAPTER": "legacy-journal"}) is True
+    assert runtime.runtime_adapter_mode({"HERMES_WEBUI_RUNTIME_ADAPTER": "runner-local"}) == "runner-local"
+    assert runtime.runtime_adapter_runner_enabled({"HERMES_WEBUI_RUNTIME_ADAPTER": "runner-local"}) is True
     assert runtime.runtime_adapter_mode({"HERMES_WEBUI_RUNTIME_ADAPTER": "sidecar"}) == "legacy-direct"
+
+
+def test_runtime_adapter_factory_selects_only_explicit_default_off_modes():
+    runtime = importlib.import_module("api.runtime_adapter")
+    calls = []
+
+    class FakeRunnerClient:
+        pass
+
+    def legacy_factory():
+        calls.append("legacy")
+        return runtime.LegacyJournalRuntimeAdapter(start_run_delegate=lambda request: {"stream_id": "s"})
+
+    def runner_factory():
+        calls.append("runner")
+        return FakeRunnerClient()
+
+    assert runtime.build_runtime_adapter(environ={}) is None
+
+    legacy = runtime.build_runtime_adapter(
+        environ={"HERMES_WEBUI_RUNTIME_ADAPTER": "legacy-journal"},
+        legacy_adapter_factory=legacy_factory,
+        runner_client_factory=runner_factory,
+    )
+    assert isinstance(legacy, runtime.LegacyJournalRuntimeAdapter)
+
+    runner = runtime.build_runtime_adapter(
+        environ={"HERMES_WEBUI_RUNTIME_ADAPTER": "runner-local"},
+        legacy_adapter_factory=legacy_factory,
+        runner_client_factory=runner_factory,
+    )
+    assert isinstance(runner, runtime.RunnerRuntimeAdapter)
+    assert calls == ["legacy", "runner"]
+
+
+def test_runner_local_factory_requires_injected_client_and_does_not_fallback_to_legacy():
+    runtime = importlib.import_module("api.runtime_adapter")
+    calls = []
+
+    def legacy_factory():
+        calls.append("legacy")
+        return runtime.LegacyJournalRuntimeAdapter(start_run_delegate=lambda request: {"stream_id": "s"})
+
+    try:
+        runtime.build_runtime_adapter(
+            environ={"HERMES_WEBUI_RUNTIME_ADAPTER": "runner-local"},
+            legacy_adapter_factory=legacy_factory,
+        )
+    except NotImplementedError as exc:
+        assert "runner client factory" in str(exc)
+    else:
+        raise AssertionError("runner-local must require an injected runner client factory")
+
+    assert calls == []
 
 
 def test_legacy_journal_adapter_start_run_delegates_without_owning_runtime_state():
@@ -353,9 +409,29 @@ def test_chat_start_route_selects_adapter_only_when_flag_enabled():
     start_body = src[start_idx:src.index("def _resolve_chat_workspace_with_recovery", start_idx)]
 
     assert "runtime_adapter_enabled()" in start_body
+    assert "runtime_adapter_runner_enabled()" in start_body
+    assert "build_runtime_adapter(" in start_body
+    assert "legacy_adapter_factory=_legacy_adapter_factory" in start_body
+    assert "runner_client_factory=_runtime_runner_client_factory" in start_body
     assert "LegacyJournalRuntimeAdapter" in start_body
     assert "_start_chat_stream_for_session(" in start_body
     assert "HERMES_WEBUI_RUNTIME_ADAPTER" not in start_body, "route should use runtime_adapter_enabled(), not inline env checks"
+
+
+def test_runner_local_chat_start_selection_does_not_fallback_to_legacy():
+    routes = importlib.import_module("api.routes")
+    src = (routes.Path(__file__).parent.parent / "api" / "routes.py").read_text(encoding="utf-8")
+    start_idx = src.index("def _handle_chat_start")
+    start_body = src[start_idx:src.index("def _resolve_chat_workspace_with_recovery", start_idx)]
+
+    flag_branch = "if runtime_adapter_enabled() or runtime_adapter_runner_enabled():"
+    assert flag_branch in start_body
+    assert "except NotImplementedError as exc:" in start_body
+    assert 'return j(handler, {"error": str(exc)}, status=501)' in start_body
+    assert "runner-local chat backend is not configured" in src
+    adapter_branch = start_body[start_body.index(flag_branch):start_body.index("else:", start_body.index(flag_branch))]
+    assert "_start_chat_stream_for_session(" in adapter_branch, "legacy-journal delegate should still call the legacy path"
+    assert "runtime_adapter_runner_enabled()" in adapter_branch
 
 
 def test_chat_start_adapter_path_preserves_legacy_response_shape():
@@ -366,17 +442,53 @@ def test_chat_start_adapter_path_preserves_legacy_response_shape():
     """
     routes = importlib.import_module("api.routes")
     src = (routes.Path(__file__).parent.parent / "api" / "routes.py").read_text(encoding="utf-8")
-    start_idx = src.index("def _handle_chat_start")
-    start_body = src[start_idx:src.index("def _resolve_chat_workspace_with_recovery", start_idx)]
-    branch_start = start_body.index("if runtime_adapter_enabled():")
-    branch_end = start_body.index("else:", branch_start)
-    adapter_branch = start_body[branch_start:branch_end]
+    helper_idx = src.index("def _chat_start_response_from_run_start")
+    helper_body = src[helper_idx:src.index("def _runtime_adapter_goal_action", helper_idx)]
 
-    assert 'response.setdefault("stream_id", result.stream_id)' in adapter_branch
-    assert 'response.setdefault("session_id", result.session_id)' in adapter_branch
-    assert 'response.setdefault("run_id", result.run_id)' not in adapter_branch
-    assert 'response.setdefault("status", result.status)' not in adapter_branch
-    assert 'response.setdefault("active_controls", result.active_controls)' not in adapter_branch
+    assert '"stream_id",' in helper_body
+    assert '"session_id",' in helper_body
+    assert 'response.setdefault("stream_id", result.stream_id)' in helper_body
+    assert 'response.setdefault("session_id", result.session_id)' in helper_body
+    assert '"run_id",' not in helper_body
+    assert '"status",' not in helper_body
+    assert '"active_controls",' not in helper_body
+
+
+def test_chat_start_response_from_run_start_filters_adapter_internal_fields():
+    routes = importlib.import_module("api.routes")
+    runtime = importlib.import_module("api.runtime_adapter")
+
+    response = routes._chat_start_response_from_run_start(
+        runtime.RunStartResult(
+            run_id="runner-internal-1",
+            session_id="s1",
+            stream_id="runner-stream-1",
+            status="running",
+            active_controls=["cancel"],
+            payload={
+                "stream_id": "runner-stream-1",
+                "session_id": "s1",
+                "pending_started_at": 123.0,
+                "turn_id": "turn-1",
+                "title": "Demo",
+                "effective_model": "gpt-5.5",
+                "effective_model_provider": "openai-codex",
+                "run_id": "runner-internal-1",
+                "status": "running",
+                "active_controls": ["cancel"],
+            },
+        )
+    )
+
+    assert response == {
+        "stream_id": "runner-stream-1",
+        "session_id": "s1",
+        "pending_started_at": 123.0,
+        "turn_id": "turn-1",
+        "title": "Demo",
+        "effective_model": "gpt-5.5",
+        "effective_model_provider": "openai-codex",
+    }
 
 
 def test_rfc_distinguishes_goal_routing_from_queue_route_staging():
@@ -404,9 +516,55 @@ def test_rfc_defines_slice4_runner_contract_before_runner_code():
     assert "no removal of the legacy in-process backend" in rfc
     assert "no default-on runner mode" in rfc
     assert "#### Slice 4b: Runner adapter client facade" in rfc
+    assert "Status as of 2026-05-20: shipped in v0.51.94 via #2599" in rfc
     assert "delegates to an injected runner client" in rfc
     assert "without relying on process-local `STREAMS`" in rfc
 
+
+def test_rfc_defines_slice4c_runner_backend_harness_gate():
+    routes = importlib.import_module("api.routes")
+    rfc = (routes.Path(__file__).parent.parent / "docs" / "rfcs" / "hermes-run-adapter-contract.md").read_text(encoding="utf-8")
+
+    assert "#### Slice 4c: Feature-flagged runner backend and restart/reattach harness" in rfc
+    assert "Status as of 2026-05-21: shipped in v0.51.105 via #2696" in rfc
+    assert "`HERMES_WEBUI_RUNTIME_ADAPTER=runner-local`" in rfc
+    assert "`legacy-direct` remains the default" in rfc
+    assert "No route-shape drift" in rfc
+    assert "Restart/reattach harness" in rfc
+    assert "discard the first WebUI adapter instance" in rfc
+    assert "No runtime-surrogate globals" in rfc
+    assert "no live chat route switch to the runner backend before the restart/reattach" in rfc
+
+
+def test_rfc_defines_slice4d_supervised_runner_route_gate():
+    routes = importlib.import_module("api.routes")
+    rfc = (routes.Path(__file__).parent.parent / "docs" / "rfcs" / "hermes-run-adapter-contract.md").read_text(encoding="utf-8")
+
+    assert "#### Slice 4d: Supervised runner backend route gate" in rfc
+    assert "Status as of 2026-05-23: shipped in v0.51.108 via #2744" in rfc
+    assert "After `runner-local` selection exists" in rfc
+    assert "route-selection harness before live\nbrowser chat can use it" in rfc
+    assert "Route remains default-off" in rfc
+    assert "Restart/reattach harness proves ownership moved" in rfc
+    assert "No public response-shape drift" in rfc
+    assert "No runtime-surrogate globals" in rfc
+    assert "Explicit context payloads" in rfc
+    assert "active-run discovery, session-to-run lookup, command capability\n  metadata, artifact events, and provider/tool routing" in rfc
+    assert "WebUI remains the rich workbench while\n  only execution ownership moves" in rfc
+
+
+def test_rfc_defines_slice4e_runner_chat_start_route_selection_harness():
+    routes = importlib.import_module("api.routes")
+    rfc = (routes.Path(__file__).parent.parent / "docs" / "rfcs" / "hermes-run-adapter-contract.md").read_text(encoding="utf-8")
+
+    assert "#### Slice 4e: Default-off runner chat-start route-selection harness" in rfc
+    assert "route `/api/chat/start` through `build_runtime_adapter(...)`" in rfc
+    assert "`legacy-direct` stays default" in rfc
+    assert "`legacy-journal`\ncontinues to delegate to the legacy in-process stream path" in rfc
+    assert "`runner-local`\ndoes not silently fall back to legacy" in rfc
+    assert "return a bounded not-configured error for `runner-local`" in rfc
+    assert "`run_id`, `status`, and\n   `active_controls` remain internal" in rfc
+    assert "no supervised runner process yet" in rfc
 
 def test_runner_runtime_adapter_passes_explicit_start_payload_without_env_mutation(monkeypatch):
     runtime = importlib.import_module("api.runtime_adapter")
