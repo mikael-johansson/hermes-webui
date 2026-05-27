@@ -1236,10 +1236,8 @@ $('msg').addEventListener('keydown',e=>{
 });
 // B14: Cmd/Ctrl+K creates a new chat from anywhere
 document.addEventListener('keydown',async e=>{
-  // Cmd/Ctrl+B toggles desktop sidebar collapse (VS Code convention).
-  // Skip when typing in an input/textarea/contenteditable so text-edit
-  // shortcuts (e.g. bold in some embedded editors) are never stolen.
-  if((e.metaKey||e.ctrlKey)&&!e.shiftKey&&!e.altKey&&(e.key==='b'||e.key==='B')){
+  // Ctrl+B DISABLED — was VS Code-style sidebar toggle. Restored to browser default.
+  if(false&&(e.metaKey||e.ctrlKey)&&!e.shiftKey&&!e.altKey&&(e.key==='b'||e.key==='B')){
     const t=e.target;
     const isText=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable);
     if(!isText&&typeof toggleSidebar==='function'&&_isDesktopWidth()){
@@ -1259,7 +1257,8 @@ document.addEventListener('keydown',async e=>{
       return;
     }
   }
-  if((e.metaKey||e.ctrlKey)&&e.key==='k'){
+  // Ctrl+K DISABLED — was "new chat" shortcut. Restored to browser default.
+  if(false&&(e.metaKey||e.ctrlKey)&&e.key==='k'){
     e.preventDefault();
     // If the current session has no messages AND nothing is in flight, just focus
     // the composer rather than creating another empty session that will clutter
