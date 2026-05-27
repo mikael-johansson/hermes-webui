@@ -1875,6 +1875,18 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                     wrote_title = True
 
         if wrote_title:
+            # Persist title to state.db (hermes sessions list) via the same
+            # backend function used by CLI/TUI/Gateway. This ensures titles
+            # generated via the WebUI also appear in `hermes sessions list`.
+            try:
+                session_db = agent._session_db if agent else None
+                if session_db is not None:
+                    # Write the already-generated title directly to state.db.
+                    # This avoids regenerating the title via another LLM call.
+                    session_db.set_session_title(session_id, next_title)
+            except Exception:
+                logger.debug("Failed to sync title to state.db for %s", session_id, exc_info=True)
+
             if source == 'fallback':
                 _put_title_status(put_event, session_id, source, fallback_reason, effective_title, raw_preview)
             else:
