@@ -1202,8 +1202,9 @@ def _sanitize_generated_title(text: str) -> str:
     # Guard against chain-of-thought leakage and meta-reasoning patterns.
     if _looks_invalid_generated_title(s):
         return ''
-    return s[:80]
-
+    # Hard cap at 50 characters to prevent truncation in sidebar/TUI/list views.
+    # Shorter titles avoid visual cutoff and look cleaner everywhere.
+    return s[:50]
 
 def _looks_invalid_generated_title(text: str) -> bool:
     s = str(text or '')
@@ -1384,8 +1385,8 @@ def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]
         (
             "Generate a short session title from this conversation start.\n"
             "Use BOTH the user's question and the assistant's visible answer.\n"
-            "Return only the title text, 3-8 words, as a topic label.\n"
-            "Do not use markdown, bullets, labels, or prefixes like Session Title:.\n"
+            "Return only the title text, 3-6 words, not exceeding 50 characters.\n"
+            "Do not use markdown, bullets, labels, or prefixes like Session Title:\n"
             "Do not output a full sentence.\n"
             "Do not output acknowledgements or completion phrases like OK, done, or all set.\n"
             "Do not describe internal reasoning.\n"
@@ -1395,8 +1396,8 @@ def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]
         (
             "Rewrite this conversation start as a concise noun-phrase title.\n"
             "Use the actual topic, not the task outcome.\n"
-            "Return title text only.\n"
-            "Do not use markdown, bullets, labels, or prefixes like Session Title:.\n"
+            "Return title text only, 3-6 words and under 50 characters.\n"
+            "Do not use markdown, bullets, labels, or prefixes like Session Title:\n"
             "Never output acknowledgements, completion status, or meta commentary."
         ),
     ]
