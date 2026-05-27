@@ -1376,8 +1376,9 @@ def _sanitize_generated_title(text: str) -> str:
     # Guard against chain-of-thought leakage and meta-reasoning patterns.
     if _looks_invalid_generated_title(s):
         return ''
-    return s[:80]
-
+    # Hard cap at 50 characters to prevent truncation in sidebar/TUI/list views.
+    # Shorter titles avoid visual cutoff and look cleaner everywhere.
+    return s[:50]
 
 def _looks_invalid_generated_title(text: str) -> bool:
     s = str(text or '')
