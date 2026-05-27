@@ -28,7 +28,7 @@ from api.agent_sessions import (
 )
 
 logger = logging.getLogger(__name__)
-CLI_VISIBLE_SESSION_LIMIT = 20
+CLI_VISIBLE_SESSION_LIMIT = 500
 _CLI_SESSIONS_CACHE_TTL_SECONDS = 5.0
 _CLI_SESSIONS_CACHE_LOCK = threading.Lock()
 _CLI_SESSIONS_CACHE = {}
