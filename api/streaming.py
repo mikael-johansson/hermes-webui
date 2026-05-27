@@ -1965,6 +1965,19 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                     wrote_title = True
 
         if wrote_title:
+            # Also persist the generated title to state.db so that `hermes
+            # sessions list` shows the same title that the WebUI sidebar
+            # displays. Without this, state.db only gets whatever s.title was
+            # at turn-completion time (before the background thread generated
+            # the real LLM title).  sync_session_usage handles profile
+            # isolation, idempotent session creation, and error suppression.
+            try:
+                from api.state_sync import sync_session_usage
+                profile = getattr(s, 'profile', None) if s else None
+                sync_session_usage(session_id=session_id, title=next_title, profile=profile)
+            except Exception:
+                logger.debug("Failed to sync title to state.db for %s", session_id, exc_info=True)
+
             if source == 'fallback':
                 _put_title_status(put_event, session_id, source, fallback_reason, effective_title, raw_preview)
             else:
@@ -2032,6 +2045,18 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
             # release the global session LOCK before persisting to avoid a
             # self-deadlock in the background title-refresh thread.
             s.save(touch_updated_at=False)
+
+        # Persist the refreshed title to state.db so that `hermes sessions list`
+        # stays in sync with the WebUI sidebar. Same rationale as in
+        # _run_background_title_update — without this, state.db holds an
+        # outdated title from the last turn-completion sync.
+        try:
+            from api.state_sync import sync_session_usage
+            profile = getattr(s, 'profile', None)
+            sync_session_usage(session_id=session_id, title=effective_title, profile=profile)
+        except Exception:
+            logger.debug("Failed to sync title to state.db for %s", session_id, exc_info=True)
+
         _put_title_status(put_event, session_id, 'refreshed', llm_status, effective_title, raw_preview)
         put_event('title', {'session_id': session_id, 'title': effective_title})
         logger.info("Adaptive title refresh: session=%s new_title=%r", session_id, effective_title)
