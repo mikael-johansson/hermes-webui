@@ -28,7 +28,7 @@ from api.agent_sessions import (
 )
 
 logger = logging.getLogger(__name__)
-CLI_VISIBLE_SESSION_LIMIT = 100
+CLI_VISIBLE_SESSION_LIMIT = 500
 # How many messageful cron sessions to surface in the project-chip layer.
 # Needs to exceed CLI_VISIBLE_SESSION_LIMIT so older cron runs stay
 # addressable even when many newer non-cron sessions dominate the default

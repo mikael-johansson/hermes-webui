@@ -440,7 +440,10 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
 
   // Persist SR failure across reloads (e.g. Tailscale/network error)
   const _micForceMediaRecorderKey='mic_force_mediarecorder';
-  let _forceMediaRecorder=!SpeechRecognition||localStorage.getItem(_micForceMediaRecorderKey)==='1';
+  // Android's built-in Web Speech API (webkitSpeechRecognition) cuts off after ~10-15 words.
+  // Force MediaRecorder (sends audio to whisper STT server) on Android devices.
+  const _isAndroid=/android|linux.*arm/i.test(navigator.userAgent);
+  let _forceMediaRecorder=!SpeechRecognition||_isAndroid||localStorage.getItem(_micForceMediaRecorderKey)==='1';
 
   // Raw audio mode preference: send audio file instead of transcribing
   let _rawAudioMode = localStorage.getItem('hermes-raw-audio-mode') === 'true';

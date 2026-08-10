@@ -2587,7 +2587,7 @@ def _dedupe_cli_sidebar_sessions_for_api(cli: list[dict], represented_webui_ids:
     return _include_project_hidden_background_sidebar_sessions(candidates, visible)
 
 
-CLI_VISIBLE_SESSION_CAP = 20
+CLI_VISIBLE_SESSION_CAP = 500
 
 
 def _cap_recent_cli_sessions(sessions: list[dict], cli_cap: int = CLI_VISIBLE_SESSION_CAP) -> list[dict]:
