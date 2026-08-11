@@ -4354,6 +4354,9 @@ def generate_title_raw_via_aux(
         reasoning_extra["reasoning"] = {"enabled": False}
     if _is_minimax_route(provider, model, base_url):
         reasoning_extra["reasoning_split"] = True
+    # Always pass thinking_budget: 0 — oMLX requires it (doesn't honor reasoning.enabled),
+    # and other OpenAI-compatible backends silently ignore unknown extra_body fields.
+    reasoning_extra["thinking_budget"] = 0
     try:
         _timeout = _aux_title_timeout()
         from agent.auxiliary_client import call_llm
@@ -4478,8 +4481,10 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> 
                         _tg_extra = dict(api_kwargs.get('extra_body') or {})
                         if _is_minimax_route(getattr(agent, 'provider', ''), getattr(agent, 'model', ''), getattr(agent, 'base_url', '')):
                             _tg_extra['reasoning_split'] = True
-                        if _tg_extra:
-                            api_kwargs['extra_body'] = _tg_extra
+                        # Always pass thinking_budget: 0 — oMLX requires it (doesn't honor reasoning.enabled),
+                        # and other backends silently ignore unknown extra_body fields.
+                        _tg_extra['thinking_budget'] = 0
+                        api_kwargs['extra_body'] = _tg_extra
                         if 'max_completion_tokens' in api_kwargs:
                             api_kwargs['max_completion_tokens'] = max_tokens
                         else:
