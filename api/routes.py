@@ -29928,6 +29928,11 @@ def _handle_handoff_summary(handler, body):
             api_kwargs.pop("tools", None)
             api_kwargs["temperature"] = 0.2
             api_kwargs["timeout"] = 30.0
+            # oMLX uses thinking_budget (not reasoning.enabled) to disable reasoning.
+            # Pass it unconditionally — other backends silently ignore unknown extra_body fields.
+            _handoff_extra = dict(api_kwargs.get("extra_body") or {})
+            _handoff_extra["thinking_budget"] = 0
+            api_kwargs["extra_body"] = _handoff_extra
             if "max_completion_tokens" in api_kwargs:
                 api_kwargs["max_completion_tokens"] = max_tokens
             else:
