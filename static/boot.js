@@ -1692,8 +1692,98 @@ window.renderTranscript=function(container, messages, opts){
     },10000);
   }
 
+  // ---- barge-in -------------------------------------------------------
+  // While the agent is speaking, watch the mic and cut it off the moment the
+  // user starts talking. This is a VAD problem, not a transcription one: it
+  // only has to know THAT speech started, not what was said.
+  //
+  // Two details this depends on:
+  //  - echoCancellation, or the mic hears the agent through the speakers and
+  //    the agent barges in on itself.
+  //  - asymmetric hysteresis: interrupting takes more consecutive speech
+  //    frames than a normal utterance would, so a cough or a keyboard click
+  //    does not cut the agent off mid-sentence.
+  const _BARGE_KEY='hermes-voice-bargein';
+  const _BARGE_FRAMES=8;        // consecutive hot frames (~130 ms at 60 fps)
+  const _BARGE_FLOOR_MULT=3.5;  // how far above the rolling noise floor counts
+  const _BARGE_FLOOR_MIN=0.015; // absolute floor, so silence never triggers
+  let _bargeCtx=null,_bargeStream=null,_bargeAnalyser=null,_bargeBuf=null;
+  let _bargeRAF=null,_bargeHot=0,_bargeNoise=0.01,_bargeStarting=false;
+
+  function _bargeEnabled(){
+    try{ return localStorage.getItem(_BARGE_KEY)!=='0'; }catch(_){ return true; }
+  }
+
+  function _bargeTick(){
+    _bargeRAF=null;
+    if(!_voiceModeActive||_voiceModeState!=='speaking'||!_bargeAnalyser) return;
+    _bargeAnalyser.getFloatTimeDomainData(_bargeBuf);
+    let sum=0;
+    for(let i=0;i<_bargeBuf.length;i++){ const v=_bargeBuf[i]; sum+=v*v; }
+    const rms=Math.sqrt(sum/_bargeBuf.length);
+    const thresh=Math.max(_bargeNoise*_BARGE_FLOOR_MULT,_BARGE_FLOOR_MIN);
+    if(rms>thresh){
+      if(++_bargeHot>=_BARGE_FRAMES){
+        _bargeHot=0;
+        // The user is talking. Stop the agent and start listening -- the same
+        // sequence the TTS watchdog already uses.
+        try{ if(typeof stopTTS==='function') stopTTS(); }catch(_){}
+        _clearBrowserTtsRecovery();
+        _startListening();
+        return;
+      }
+    }else{
+      _bargeHot=0;
+      // Track the room only while it is quiet, so the agent's own residual
+      // never raises the floor to the point where nothing can interrupt it.
+      _bargeNoise=_bargeNoise*0.95+rms*0.05;
+    }
+    _bargeRAF=requestAnimationFrame(_bargeTick);
+  }
+
+  async function _bargeStart(){
+    if(!_bargeEnabled()||_bargeStarting) return;
+    if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia) return;
+    if(!_bargeAnalyser){
+      _bargeStarting=true;
+      try{
+        _bargeStream=await navigator.mediaDevices.getUserMedia({audio:{
+          echoCancellation:true, noiseSuppression:true, autoGainControl:false
+        }});
+        const Ctx=window.AudioContext||window.webkitAudioContext;
+        _bargeCtx=new Ctx();
+        const src=_bargeCtx.createMediaStreamSource(_bargeStream);
+        _bargeAnalyser=_bargeCtx.createAnalyser();
+        _bargeAnalyser.fftSize=1024;
+        src.connect(_bargeAnalyser);   // analyser only -- never routed to output
+        _bargeBuf=new Float32Array(_bargeAnalyser.fftSize);
+      }catch(_){
+        _bargeAnalyser=null;
+        _bargeStarting=false;
+        return;                        // no mic permission: barge-in is simply off
+      }
+      _bargeStarting=false;
+    }
+    try{ if(_bargeCtx&&_bargeCtx.state==='suspended') await _bargeCtx.resume(); }catch(_){}
+    _bargeHot=0;
+    if(!_bargeRAF) _bargeRAF=requestAnimationFrame(_bargeTick);
+  }
+
+  function _bargePause(){
+    if(_bargeRAF){ cancelAnimationFrame(_bargeRAF); _bargeRAF=null; }
+    _bargeHot=0;
+  }
+
+  function _bargeRelease(){
+    _bargePause();
+    try{ if(_bargeStream) _bargeStream.getTracks().forEach(t=>t.stop()); }catch(_){}
+    try{ if(_bargeCtx) _bargeCtx.close(); }catch(_){}
+    _bargeStream=null; _bargeCtx=null; _bargeAnalyser=null; _bargeBuf=null;
+  }
+
   function _setState(state){
     _voiceModeState=state;
+    if(state==='speaking'){ _bargeStart(); } else { _bargePause(); }
     indicator.className='voice-mode-indicator '+state;
     label.textContent=state==='listening'?t('voice_listening')
       :state==='speaking'?t('voice_speaking')
@@ -1794,6 +1884,7 @@ window.renderTranscript=function(container, messages, opts){
     _voiceModeThinkingSid=(typeof S!=='undefined'&&S.session)?S.session.session_id:null;
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
+    _bargeRelease();
     // send() is global from boot.js
     if(typeof send==='function') send();
   }
