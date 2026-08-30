@@ -5486,6 +5486,25 @@ def _title_prompt_language_rule(user_text: str, pinned_language: Optional[str] =
     return "Match the language of the user question.\n"
 
 
+def _title_prompt_emoji_rule() -> str:
+    """Hint that a single leading emoji is welcome when it clearly fits.
+
+    Optional by design ("when applicable"): the model is told to add an emoji
+    only when one clearly represents the topic, to keep at most one, and to
+    omit it otherwise. A leading emoji helps the sidebar stay scannable /
+    differentiate conversations. Emoji are not a writing "script", so they are
+    transparent to the cross-script language-drift check, and they are not CJK
+    literals, so the English-only source test is unaffected.
+    """
+    return (
+        "You may start the title with ONE emoji that clearly matches the topic "
+        "(e.g. 🐍 for Python code, 🗄️ for data or a database, ⛅ for weather). "
+        "Use an emoji only when one clearly fits the topic; otherwise omit it, "
+        "and never use more than one. A single leading emoji is allowed and is "
+        "not the forbidden 'Title:' prefix.\n"
+    )
+
+
 def _title_language_mismatch(user_text: str, title: str) -> bool:
     """Reject titles whose language clearly diverges from the conversation start.
 
@@ -5565,23 +5584,27 @@ def _generated_title_language_mismatch(user_text: str, title: str, pinned_langua
 def _title_prompts(user_text: str, assistant_text: str, pinned_language: Optional[str] = None) -> tuple[str, list[str]]:
     qa = f"User question:\n{user_text[:500]}\n\nAssistant answer:\n{assistant_text[:500]}"
     language_rule = _title_prompt_language_rule(user_text, pinned_language)
+    emoji_rule = _title_prompt_emoji_rule()
     prompts = [
         (
             "Generate a short session title from this conversation start.\n"
             "Use BOTH the user's question and the assistant's visible answer.\n"
             f"{language_rule}"
+            f"{emoji_rule}"
             "Return only the title text, 3-8 words, as a topic label.\n"
             "Do not use markdown, bullets, labels, or prefixes like Session Title:.\n"
             "Do not output a full sentence.\n"
             "Do not output acknowledgements or completion phrases like OK, done, or all set.\n"
             "Do not describe internal reasoning.\n"
             "Bad: The user is asking..., OK, all set.\n"
-            "Good: Title Generation Test, Clarify Dialog Layout, GitHub Issue Triage"
+            "Good: Title Generation Test, Clarify Dialog Layout, GitHub Issue Triage\n"
+            "Good (with emoji): 🐍 Fix Python Import Error, ⛅ Weekend Weather Forecast"
         ),
         (
             "Rewrite this conversation start as a concise noun-phrase title.\n"
             "Use the actual topic, not the task outcome.\n"
             f"{language_rule}"
+            f"{emoji_rule}"
             "Return title text only.\n"
             "Do not use markdown, bullets, labels, or prefixes like Session Title:.\n"
             "Never output acknowledgements, completion status, or meta commentary."
