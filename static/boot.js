@@ -1715,6 +1715,7 @@ window.renderTranscript=function(container, messages, opts){
   }
 
   function _setState(state){
+    _vmDebug('setState: '+_voiceModeState+' -> '+state);
     _voiceModeState=state;
     if(state==='speaking'){ _bargeStart(); } else { _bargePause(); }
     indicator.className='voice-mode-indicator '+state;
@@ -1725,7 +1726,267 @@ window.renderTranscript=function(container, messages, opts){
     bar.style.display=_voiceModeActive?(state==='idle'?'none':''):'none';
   }
 
+  // ── Server-side STT engine (MediaRecorder + /api/transcribe) ─────────────
+  // The browser SpeechRecognition engine is a thin client to the browser
+  // vendor's cloud speech service (Google's for Chromium). Behind corporate
+  // VPNs, on offline machines, or in browsers without the Web Speech API, it
+  // silently produces no results — the old onend handler just re-armed it, so
+  // the UI sat on "Listening…" forever with no error. This engine removes that
+  // dependency: it records with MediaRecorder (the same path the 🎤 dictation
+  // button uses) and transcribes on the Hermes server. Speech is segmented by
+  // a small RMS onset/silence VAD, so the clip stops itself when you pause.
+  const _vmServerSttKey='hermes-voice-mode-server-stt';
+  let _vmServerSttOk=false;
+  // TEMPORARY diagnostic trace (2026-09-02): records which voice-mode code
+  // paths actually executed so a stuck "Listening…" state is diagnosable from
+  // the browser console. Read with window.__vmDebug(); removed once the
+  // issue is resolved.
+  let _vmDebugLog=[];
+  function _vmDebug(msg){
+    try{
+      _vmDebugLog.push({t:new Date().toISOString().slice(11,23),m:String(msg)});
+      if(_vmDebugLog.length>400) _vmDebugLog.shift();
+      // console.info keeps it in the browser console; a missing `window`
+      // (headless test sandboxes) must never break the real code path.
+      if(typeof console!=='undefined'&&console.info) console.info('[vm-debug]',String(msg));
+    }catch(_){}
+  }
+  (function(){
+    try{
+      if(typeof window==='undefined') return;
+      window.__vmDebug=function(){
+        try{
+          return {
+            active:_voiceModeActive,
+            state:_voiceModeState,
+            engineOk:_vmServerSttOk,
+            latched:localStorage.getItem(_vmServerSttKey),
+            hasSR:!!(window.SpeechRecognition||window.webkitSpeechRecognition),
+            hasTTS:('speechSynthesis' in window),
+            isSecureContext:window.isSecureContext,
+            gUM:!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia),
+            hasMediaRecorder:!!window.MediaRecorder,
+            mrMime:_vmRecorderMime,
+            agentBusy:typeof S!=='undefined'&&!!S.busy,
+            events:_vmDebugLog
+          };
+        }catch(_){ return {error:String(_)}; }
+      };
+      window.__vmDebugReset=function(){ _vmDebugLog=[]; };
+    }catch(_){}
+  })();
+  let _vmRecorder=null, _vmStream=null, _vmChunks=null, _vmVadLoop=null;
+  let _vmAudioCtx=null, _vmAnalyser=null;
+  let _vmVadState=null, _vmOnsetFrames=8, _vmSilenceFrames=12;
+  let _vmSttFails=0, _vmStopping=false;
+
+  async function _probeVoiceModeServerStt(){
+    _vmDebug('probe: enter (MediaRecorder='+(!!window.MediaRecorder)+' gUM='+!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia)+')');
+    if(!window.MediaRecorder||!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia)){ _vmDebug('probe: early-return, no MediaRecorder/gUM'); return; }
+    try{
+      // getItem returns JS null when the key is absent — NOT the string 'null'.
+      // Guard with (stored != null) so a fresh browser falls through to the fetch;
+      // only a prior real probe result ('1'/'0') short-circuits the re-probe.
+      const stored=localStorage.getItem(_vmServerSttKey);
+      if(stored != null){ _vmServerSttOk=stored==='1'; _vmDebug('probe: cached '+stored+', skip fetch'); return; }
+      _vmDebug('probe: no cached value, fetching api/transcribe/capability');
+      const res=await fetch('api/transcribe/capability',{cache:'no-store'});
+      const data=await res.json().catch(()=>({}));
+      _vmServerSttOk=res.ok&&!!(data&&data.available);
+      try{ localStorage.setItem(_vmServerSttKey,_vmServerSttOk?'1':'0'); }catch(_){}
+      _vmDebug('probe: available='+_vmServerSttOk+' provider='+(data&&data.provider));
+    }catch(_e){ _vmServerSttOk=false; _vmDebug('probe: fetch FAILED '+_e); }
+  }
+  _probeVoiceModeServerStt();
+
+  // Same family as the barge-in VAD (adaptive floor, 3.5x multiplier, 16.7ms
+  // frames) but speech-guarded: the ambient baseline only updates on QUIET
+  // frames. A floor that updated on every frame would chase a sustained
+  // utterance and push the threshold above the signal, so onset would never
+  // latch. Returns 'stop' once a silence gap follows detected speech.
+  function _vmVadTick(rms, st){
+    const th=Math.max(st.noise*3.5, 0.015);
+    const quiet=rms<=th;
+    if(!st.started){
+      if(!quiet){ if(++st.onset>=_vmOnsetFrames){ st.started=true; st.silence=0; } }
+      else{ st.onset=0; st.noise=st.noise*0.95+rms*0.05; }
+    }else{
+      if(quiet){ if(++st.silence>=_vmSilenceFrames) return 'stop'; st.noise=st.noise*0.95+rms*0.05; }
+      else st.silence=0;
+    }
+    return st.started?'speaking':'waiting';
+  }
+
+  function _vmStopCapture(){
+    const recorder=_vmRecorder;
+    if(_vmVadLoop){ clearInterval(_vmVadLoop); _vmVadLoop=null; }
+    if(_vmAnalyser){ try{ _vmAnalyser.disconnect(); }catch(_){} _vmAnalyser=null; }
+    if(_vmAudioCtx){ try{ if(_vmAudioCtx.state!=='closed') _vmAudioCtx.close(); }catch(_){} _vmAudioCtx=null; }
+    if(recorder){
+      try{ if(recorder.state==='recording') recorder.stop(); }catch(_){}
+      _vmRecorder=null;
+    }
+    if(_vmStream){
+      _vmStream.getTracks().forEach(t=>{ try{t.stop();}catch(_){} });
+      _vmStream=null;
+    }
+    _vmVadState=null;
+    _vmChunks=null;
+    _vmStopping=false;
+  }
+
+  function _vmTranscribeStop(reason){
+    const recorder=_vmRecorder;
+    const state0=recorder?recorder.state:null;
+    _vmDebug('vmTranscribeStop reason='+reason+' recorderState='+state0);
+    if(recorder){
+      if(recorder.state==='inactive'){
+        // Already stopped (e.g. barge-in tore the capture down while the agent
+        // was speaking — there's no new utterance to transcribe).
+        _vmStopCapture();
+        return;
+      }
+      if(reason!=='stop') return;
+    }
+    // Snapshot the buffered chunks and mime BEFORE _vmStopCapture() — that
+    // helper nulls _vmChunks (and the recorder), and the blob must be built
+    // from the audio already captured, not a fresh read of the reset fields.
+    const chunks=_vmChunks;
+    const mime=recorder?recorder.mimeType:_vmRecorderMime;
+    _vmStopCapture();
+    const blob=chunks&&chunks.length?new Blob(chunks,{type:mime||'audio/webm'}):null;
+    if(!blob||!blob.size){
+      _vmDebug('vmTranscribeStop: no audio (chunks='+(chunks?chunks.length:'none')+' state='+state0+')');
+      if(_voiceModeActive&&_voiceModeState==='listening') _startListening();
+      return;
+    }
+    if(!_voiceModeActive) return;
+    _vmDebug('vmTranscribeStop: blob ' + blob.size + 'B, POST api/transcribe');
+    _setState('thinking');
+    setComposerStatus('Transcribing…');
+    const form=new FormData();
+    form.append('file',new File([blob],`voice-mode.${(blob.type&&blob.type.includes('ogg'))?'ogg':'webm'}`,{type:blob.type||'audio/webm'}));
+    fetch('api/transcribe',{method:'POST',body:form})
+      .then(res=>res.json().catch(()=>({})).then(data=>({res,data})))
+      .then(({res,data})=>{
+        if(!res.ok) throw new Error(data.error||t('voice_mode_transcribe_error'));
+        const transcript=(data.transcript||'').trim();
+        _vmDebug('transcribe ok: ' + (transcript?JSON.stringify(transcript.slice(0,80)):'<empty>') + ' http=' + res.status);
+        setComposerStatus('');
+        if(!_voiceModeActive) return;
+        if(!transcript){
+          if(_voiceModeState==='listening') _startListening();
+          return;
+        }
+        ta.value=transcript; autoResize();
+        _voiceModeSend();
+      })
+      .catch(err=>{
+        _vmDebug('transcribe FAILED: ' + (err&&err.message||err) + ' fails=' + _vmSttFails);
+        setComposerStatus('');
+        if(!_voiceModeActive) return;
+        if(++_vmSttFails>=3){
+          _deactivate();
+          showToast(err.message||t('voice_mode_transcribe_error'));
+        }else if(_voiceModeState==='listening'){
+          setTimeout(()=>{ if(_voiceModeActive) _startListening(); },1000);
+        }
+      });
+  }
+  let _vmRecorderMime='';
+
+  function _startListeningServerStt(){
+    _vmDebug('startListeningServerStt: recorder-inflight=' + (!!_vmRecorder));
+    if(!_voiceModeActive) return;
+    if(_vmRecorder){
+      // A capture is already in flight — let its VAD/onstop drive the loop.
+      return;
+    }
+    _clearBrowserTtsRecovery();
+    _setState('listening');
+    navigator.mediaDevices.getUserMedia({audio:true})
+      .then(async stream=>{
+        if(!_voiceModeActive||_voiceModeState!=='listening'){
+          stream.getTracks().forEach(t=>{ try{t.stop();}catch(_){} });
+          return;
+        }
+        if(_vmRecorder) return; // deactivated while awaiting
+        _vmDebug('gUM ok, creating MediaRecorder');
+        _vmStream=stream;
+        const preferred=['audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus','audio/ogg'];
+        const mimeType=preferred.find(m=>window.MediaRecorder.isTypeSupported?.(m))||'';
+        _vmRecorderMime=mimeType;
+        const recorder=new MediaRecorder(stream,mimeType?{mimeType}:undefined);
+        _vmRecorder=recorder; _vmChunks=[];
+        const chunks=_vmChunks;
+        recorder.ondataavailable=e=>{ if(e.data&&e.data.size) chunks.push(e.data); };
+        recorder.onerror=()=>{ _vmDebug('recorder.onerror'); if(_vmRecorder===recorder) _vmTranscribeStop('error'); };
+        recorder.onstop=()=>{ _vmDebug('recorder.onstop (chunks='+(_vmChunks?_vmChunks.length:0)+')'); if(_vmRecorder===recorder) _vmTranscribeStop('stop'); };
+        try{ recorder.start(100); _vmDebug('recorder started, mime=' + mimeType); }catch(_){ _vmDebug('recorder.start threw ' + _); return; }
+        _vmVadState={noise:0.015,onset:0,silence:0,started:false};
+        // Dedicated analyser + interval for the ONSET/GAP-STOP VAD only.
+        // Barge-in during the 'speaking' state is handled separately by the
+        // existing _bargeStart/_bargeTick machinery (its own analyser/RAF),
+        // which _setState('speaking') already arms — no call from here.
+        const Ctx=window.AudioContext||window.webkitAudioContext;
+        if(Ctx){
+          try{
+            _vmAudioCtx=new Ctx();
+            const src=_vmAudioCtx.createMediaStreamSource(stream);
+            _vmAnalyser=_vmAudioCtx.createAnalyser();
+            _vmAnalyser.fftSize=2048;
+            src.connect(_vmAnalyser);
+            const buf=new Float32Array(_vmAnalyser.fftSize);
+            let _vmVadBeats=0;
+            _vmVadLoop=setInterval(()=>{
+              if(!_voiceModeActive||!_vmVadState||!_vmAnalyser) return;
+              _vmAnalyser.getFloatTimeDomainData(buf);
+              let sum=0;
+              for(let i=0;i<buf.length;i++) sum+=buf[i]*buf[i];
+              const rms=Math.sqrt(sum/buf.length);
+              const outcome=_vmVadTick(rms,_vmVadState);
+              if(++_vmVadBeats%250===1) _vmDebug('vad heartbeat: rms='+rms.toFixed(4)+' started='+_vmVadState.started+' onset='+_vmVadState.onset+'/8 silence='+_vmVadState.silence+'/12 noise='+_vmVadState.noise.toFixed(4)+' chunks='+(_vmChunks?_vmChunks.length:0));
+              if(outcome==='stop'&&_vmRecorder&&_vmRecorder.state==='recording'){
+                _vmDebug('VAD gap-stop (speech then silence) -> transcribe');
+                _vmTranscribeStop('stop');
+              }
+            },16);
+          }catch(_){
+            // No analyser: still recording, but no VAD to stop it — rely on
+            // _deactivate() releasing the capture.
+            _vmAnalyser=null;
+          }
+        }
+      })
+      .catch(err=>{
+        if(!_voiceModeActive) return;
+        const name=err&&err.name;
+        _vmDebug('gUM FAILED: ' + (name||String(err)));
+        if(name==='NotAllowedError'||name==='SecurityError'){
+          _deactivate();
+          showToast(t('mic_denied'));
+        }else{
+          // No microphone, or media capture unavailable — fall back to the
+          // browser engine, which may still work (e.g. SR-based capture).
+          _startListeningBrowser();
+        }
+      });
+  }
+
+  // Engine dispatcher: prefer Hermes server STT when the capability probe
+  // confirmed a provider; otherwise use the browser SpeechRecognition loop.
   function _startListening(){
+    _vmDebug('startListening: engine=' + (_vmServerSttOk?'server-stt':'browser') + ' (agentBusy=' + (typeof S!=='undefined'&&!!S.busy) + ')');
+    if(!_voiceModeActive) return;
+    if(_vmServerSttOk){
+      _startListeningServerStt();
+      return;
+    }
+    _startListeningBrowser();
+  }
+
+  function _startListeningBrowser(){
+    _vmDebug('startListeningBrowser: state=' + _voiceModeState + ' hasSR=' + (!!SpeechRecognition) + ' secure=' + window.isSecureContext);
     if(!_voiceModeActive) return;
     if(_micOriginNeedsSecureContext()){
       _deactivate();
@@ -1805,6 +2066,10 @@ window.renderTranscript=function(container, messages, opts){
 
   function _voiceModeSend(){
     if(!_voiceModeActive) return;
+    // Cancel any pending silence/auto-send timer so the gap-stop (server
+    // engine) and an explicit send (Enter, send button, or the browser
+    // engine's timer) can't double-fire the same utterance.
+    clearTimeout(_silenceTimer);
     const text=(ta.value||'').trim();
     if(!text){
       ta.value='';
@@ -1817,6 +2082,7 @@ window.renderTranscript=function(container, messages, opts){
     _voiceModeThinkingSid=(typeof S!=='undefined'&&S.session)?S.session.session_id:null;
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
+    _vmStopCapture(); // release any in-flight server-STT capture (Enter/send mid-recording)
     _bargeRelease();
     // send() is global from boot.js
     if(typeof send==='function') send();
@@ -2104,7 +2370,9 @@ window.renderTranscript=function(container, messages, opts){
   };
 
   function _activate(){
+    _vmDebug('activate: secure=' + window.isSecureContext);
     if(_micOriginNeedsSecureContext()){
+      _vmDebug('activate: insecure origin, abort');
       showToast(t('mic_insecure_origin'));
       return;
     }
@@ -2114,6 +2382,7 @@ window.renderTranscript=function(container, messages, opts){
     showToast(t('voice_mode_active'),1500);
     // If the agent is busy, wait — state will be 'thinking' and we'll detect completion
     if(typeof S!=='undefined'&&S.busy){
+      _vmDebug('activate: agent busy (S.busy) — parked in thinking until run ends');
       _setState('thinking');
       return;
     }
@@ -2132,6 +2401,7 @@ window.renderTranscript=function(container, messages, opts){
     bar.style.display='none';
     clearTimeout(_silenceTimer);
     _clearBrowserTtsRecovery();
+    _vmStopCapture();
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
     if(typeof stopTTS==='function') stopTTS();
@@ -2143,6 +2413,7 @@ window.renderTranscript=function(container, messages, opts){
   }
 
   modeBtn.onclick=()=>{
+    _vmDebug('modeBtn clicked: active=' + _voiceModeActive);
     if(_voiceModeActive){
       _deactivate();
       showToast(t('voice_mode_off'),1500);
