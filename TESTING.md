@@ -2007,6 +2007,32 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 - Send message → button disappears after textarea clears.
 - While agent is responding → send button hidden.
 
+### Voice mode: server-side STT engine (offline/VPN-safe)
+- Open Hermes in a Chromium browser (Chrome/Edge/Brave) where the server has
+  a local STT provider configured (`stt.enabled: true` in `~/.hermes/config.yaml`).
+- Toggle voice mode (waveform button in the composer). The engine is chosen
+  automatically: server STT when `/api/transcribe/capability` reports
+  `available: true`, otherwise the browser Web Speech API fallback.
+- Speak a sentence, then pause for ~200 ms or longer → the clip stops
+  itself, the transcript appears in the composer, and the message sends
+  automatically after the configured silence timeout.
+- Works with NO internet connectivity to Google's speech backend: the only
+  network hop is `POST /api/transcribe` to the local Hermes server.
+  Verify by cutting network access (or testing on a machine whose egress
+  blocks speech.google.com) — voice mode must still transcribe.
+- Barge-in still works: while the agent is speaking (TTS), start talking —
+  the reply stops and listening resumes (existing `_bargeStart`/`_bargeTick`
+  machinery, unchanged by the engine split).
+- Repeated transcription failures (e.g. server STT dies mid-session) must
+  show a toast after 3 attempts and exit voice mode — never an error-free
+  eternal "Listening…".
+- Exit voice mode (toggle off) → the microphone is released (recorder,
+  analyser, and audio tracks all stopped). Re-entering starts a fresh
+  capture; no hot mic leaks between sessions.
+- Browser fallback: with no server STT provider (capability `available:
+  false`), voice mode uses the browser `SpeechRecognition` loop exactly as
+  before this change.
+
 ### Sprint 21: Mobile Responsive + Docker
 - Open on mobile viewport (<640px): hamburger icon visible in topbar.
 - Tap hamburger → sidebar slides in from left with backdrop overlay.
