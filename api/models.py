@@ -1191,6 +1191,33 @@ def model_explicit_pick_signature(model, model_provider) -> str:
     return f"{_m}\x1f{_p}"
 
 
+def _deduplicate_stable_message_ids_for_persistence(messages):
+    """Remove repeated stable-ID snapshots before serializing a session."""
+    output = []
+    by_id = {}
+    for message in list(messages or []):
+        if not isinstance(message, dict):
+            output.append(message)
+            continue
+        message_id = message.get("id")
+        if message_id is None or isinstance(message_id, bool):
+            output.append(message)
+            continue
+        existing_index = by_id.get(message_id)
+        if existing_index is None:
+            by_id[message_id] = len(output)
+            output.append(message)
+            continue
+        existing = output[existing_index]
+        if not isinstance(existing, dict):
+            continue
+        for key, value in message.items():
+            if key in {"content", "reasoning"} and not value and existing.get(key):
+                continue
+            existing[key] = value
+    return output
+
+
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), created_workspace=None,
@@ -1419,6 +1446,8 @@ class Session:
             'process_wakeup_pause',
             'share_token', 'share_created_at',
         ]
+        self.messages = _deduplicate_stable_message_ids_for_persistence(self.messages)
+        self.context_messages = _deduplicate_stable_message_ids_for_persistence(self.context_messages)
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         # #5854: message_count and a compact anchor-scene fingerprint go in the
         # metadata prefix (BEFORE messages) so load_metadata_only() and the
