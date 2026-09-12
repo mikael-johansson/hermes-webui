@@ -25887,8 +25887,17 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
     gateway_keys = []
     local_gateway_approval_id = ""
     gateway_head_matches_target = False
+    # Whether a real (blocking) producer is parked in _gateway_queues for this
+    # session at resolve time. Captured under _lock below and read outside it.
+    # A *tokenless, producer-less* pending entry is the agent-core
+    # non-blocking fallback (no notify callback registered for the session at
+    # guard time, e.g. an async subagent that outlived its parent turn): it
+    # has no approval_id, no mirror token, and nothing parked to unblock.
+    # See test_subagent_approval_loop.py.
+    has_parked_producer = False
     with _lock:
         reconcile_gateway_pending_mirror_locked(sid)
+        has_parked_producer = bool(_gateway_queues.get(sid))
         queue = _pending.get(sid)
         if isinstance(queue, list):
             if approval_id:
@@ -26012,6 +26021,28 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
     # every choice, so "once" still lets the current tool run; we just must not
     # call approve_session() here, or the next matching guarded call would find
     # the pattern already session-approved and skip its approval card (#6017).
+    #
+    # EXCEPTION — tokenless non-blocking fallback (the subagent re-fire loop):
+    # A tokenless, producer-less entry has NO parked agent thread to unblock
+    # (resolve_gateway_approval() will return 0) and, for "once", records no
+    # consent — so the click is a no-op and the agent's retry of the same
+    # command re-fires a brand-new card forever (see
+    # test_subagent_approval_loop.py). For that shape, "let it run" can only
+    # be expressed as session-scope consent: record it so the next guard pass
+    # short-circuits at its is_approved() pre-check (checked BEFORE the
+    # blocking/fallback fork) and the command actually runs without a new card.
+    # This is deliberately NOT applied to parked/tokened cards (has_parked_producer)
+    # or WebUI-submitted cards (approval_id present), which keep exact #6017
+    # "once"-does-not-persist behavior.
+    if (
+        choice == "once"
+        and pending is not None
+        and not has_parked_producer
+        and not str(pending.get("approval_id") or "").strip()
+        and not str(pending.get(_GATEWAY_MIRROR_TOKEN) or "").strip()
+    ):
+        for k in all_keys:
+            approve_session(sid, k)
     # Unblock the agent thread waiting in the gateway approval queue.
     # This is the primary signal when streaming is active — the agent
     # thread is parked in entry.event.wait() and needs to be woken up.

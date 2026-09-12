@@ -152,6 +152,26 @@ and 5; it does not mark every run-state boundary implemented.
    still owns a live channel. Staleness is measured from the cancellation
    timestamp (falling back to run start), so a long-running turn cancelled
    moments ago is never mistaken for an orphan.
+10. **Approval resolution is one-way to a terminal state.** A user click on a
+   pending approval card must move the card to a terminal state for that
+   approval scope: it must not reappear in the same scope after being
+   approved or denied. For **tokenless fallback cards** (raw agent-core
+   `_pending` entries with no `approval_id`, no mirror token, and no parked
+   producer in `_gateway_queues`) the "once" choice records
+   **session-scope consent** via `approve_session(session_id, pattern_key)`
+   because there is no parked thread to unblock and no `approval_id` to
+   resolve against. The next time the same session re-fires the same
+   pattern, the guard's `is_approved()` short-circuit runs the command
+   instead of producing a new card. This is distinct from **parked blocking
+   cards** (which have a real producer in `_gateway_queues`), where "once"
+   deliberately persists nothing per #6017 and unblocks the parked thread
+   directly. The discriminator is (a) the presence of `approval_id` or
+   `_webui_mirror_token` in the pending entry, and (b)
+   `_gateway_queues.get(session_id)` being empty (no producer). Tests:
+   `tests/test_subagent_approval_loop.py` (tokenless once→session-consent;
+   parked once does not persist) and
+   `tests/test_issue6017_approve_once_no_persist.py` (parked invariant
+   preserved).
 
 10. **Liveness display derives from `ACTIVE_RUNS`, not the attach id.** A
     "working"/"active" indicator shown to the user — the transparent-turn
