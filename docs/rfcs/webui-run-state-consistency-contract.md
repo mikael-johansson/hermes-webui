@@ -268,6 +268,22 @@ and 5; it does not mark every run-state boundary implemented.
    timestamp (falling back to run start), so a long-running turn cancelled
    moments ago is never mistaken for an orphan.
 
+10. **Liveness display derives from `ACTIVE_RUNS`, not the attach id.** A
+    "working"/"active" indicator shown to the user — the transparent-turn
+    footer's spinner + label, and the sidebar row for a running session or
+    subagent child — must be computed from the `ACTIVE_RUNS` registry (a live,
+    non-stale row, or a `phase="cancelling"` row inside its unwind window), not
+    from the session's own `active_stream_id`. The attach id is only set when a
+    browser SSE client connects; subagent children run server-side with
+    `active_stream_id=None`, so keying display on the attach id makes a
+    genuinely-active child look idle and lets a finished turn keep a spinner (or
+   , conversely, show "Done" while the worker is still unwinding). The display
+    predicate and the busy/admission predicate must agree on the same
+    `ACTIVE_RUNS` truth, and the same stale-unwind ceiling that bounds
+    invariant 9's cancelling rows bounds the indicator: once a row is reclaimed
+    the display must settle. The label is an i18n key mirrored into every
+    locale so the key-coverage parity tests hold.
+
 ## Client-side unread persistence (sidebar layer)
 
 The sidebar unread dot is backed by two client-side stores in `static/sessions.js`.
@@ -375,6 +391,10 @@ context reconstruction, or session metadata:
 - Does this change read `ACTIVE_RUNS` for admission ("may a turn start?") or for
   attachment ("may a browser render this?"), and does it use the matching
   predicate for that question?
+- Does any user-visible "working"/"active"/spinner indicator derive from
+  `ACTIVE_RUNS` (live or in-unwind row) rather than from the session's own
+  `active_stream_id`? If it shows a spinner/label, is the label an i18n key
+  mirrored into every locale block so the key-coverage parity tests hold?
 - If it introduces or changes a reclamation window, what proves an in-flight
   cancellation is not evicted early, and that a wedged one is eventually freed?
 - Can automatic compression or recovery text become visible active-turn content?
