@@ -12505,11 +12505,10 @@ function _transparentTurnFooterHtml(durationText, modelText, ttftText, tokensTex
   // session reports working=true) the turn is NOT done — reuse the existing live
   // run-status spinner (tool-card-running-dot / wlpulse) + a short "Working…"
   // label. Only on true settlement do we fall through to the plain status text.
-  // The label is a plain hardcoded string (not a t() key): adding a new i18n
-  // key would have to be mirrored into every other locale to satisfy the
-  // locale key-coverage parity tests, and those other locales are out of scope.
+  // The label is a real i18n key ('working'), mirrored into every locale block
+  // so the locale key-coverage parity tests stay green.
   if(working){
-    parts.push(`<span class="lf-status"><span class="live-run-status-dot tool-card-running-dot" aria-hidden="true"></span>&nbsp;<span class="lf-working-label">Working\u2026</span></span>`);
+    parts.push(`<span class="lf-status"><span class="live-run-status-dot tool-card-running-dot" aria-hidden="true"></span>&nbsp;<span class="lf-working-label">${t('working')}</span></span>`);
   }else if(statusText){
     parts.push(`<span class="lf-status">${esc(statusText)}</span>`);
   }
