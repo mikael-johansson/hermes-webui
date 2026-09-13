@@ -2268,8 +2268,17 @@ class Session:
             'process_wakeup_pause': self.process_wakeup_pause if isinstance(self.process_wakeup_pause, dict) else {},
             'share_token': self.share_token,
             'share_created_at': self.share_created_at,
-            'is_streaming': _is_streaming_session(
-                self.active_stream_id, active_stream_ids
+            # Liveness (not just attach-id): a session is "streaming/working"
+            # iff its agent run is still alive — either its attached
+            # active_stream_id is in the live set, OR it still has a live,
+            # non-stale ACTIVE_RUNS row (the detached / cancelling-unwind
+            # window where active_stream_id is already cleared). Reusing the
+            # authoritative _is_session_working helper makes subagent CHILD
+            # rows (which have no attached SSE client, so their
+            # active_stream_id is None) report liveness from ACTIVE_RUNS,
+            # instead of always reading idle and never showing the dot.
+            'is_streaming': _is_session_working(
+                self.session_id, self.active_stream_id, active_stream_ids
             ) if include_runtime else False,
         }
         if sidebar_metadata_only:
@@ -7203,7 +7212,12 @@ def all_sessions(
                     logger.debug("Failed to persist last_message_at backfill")
             _diag_stage(diag, "all_sessions.mark_streaming")
             for s in index:
-                s['is_streaming'] = _is_streaming_session(
+                # Use the authoritative ACTIVE_RUNS-based liveness helper so
+                # subagent CHILD rows (active_stream_id is None — no attached
+                # SSE client) are flagged streaming while their delegate worker
+                # is still alive, instead of always reading idle.
+                s['is_streaming'] = _is_session_working(
+                    s.get('session_id'),
                     s.get('active_stream_id'),
                     active_stream_ids,
                 )
