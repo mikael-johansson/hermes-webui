@@ -14001,6 +14001,21 @@ def _handle_session_get(handler, parsed) -> bool:
             "threshold_tokens": _threshold_tokens,
             "last_prompt_tokens": getattr(s, "last_prompt_tokens", 0) or 0,
         }
+        # Premature-\"Done\" fix: expose the authoritative worker-liveness flag so
+        # the client (and the transparent turn footer) can tell a still-working
+        # turn from a settled one even after active_stream_id is cleared. This
+        # is the same decision the done payload makes; computed from ACTIVE_RUNS.
+        try:
+            from api.models import _is_session_working
+            raw["working"] = bool(
+                _is_session_working(
+                    getattr(s, "session_id", None),
+                    active_stream_id=getattr(s, "active_stream_id", None),
+                    active_stream_ids=active_stream_ids,
+                )
+            )
+        except Exception:
+            raw["working"] = False
         if original_stream_id:
             try:
                 journal = find_run_summary(original_stream_id)
@@ -14830,6 +14845,7 @@ def handle_get(handler, parsed) -> bool:
         return True
 
     if parsed.path == "/api/session":
+
         return _handle_session_get(handler, parsed)
 
     if parsed.path == "/api/session/lineage/report":

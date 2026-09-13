@@ -13063,6 +13063,11 @@ function _transparentTurnMetaMessage(turn){
 // mode. Shows duration, first-token time, token usage, and final status.
 // Only rendered for turns that have transparent event rows.
 function _transparentTurnFooterHtml(durationText, modelText, ttftText, tokensText, statusText, modelTitle){
+  // Premature-"Done" fix: liveness is read from the session object itself
+  // (S.session.working), stamped by the server on the done payload / GET
+  // /api/session / session-list overlay. Kept OUT of the param list so this
+  // function's 6-param signature stays stable (pinned by test_issue6068).
+  const working=!!(S&&S.session&&S.session.working);
   const parts=[];
   if(durationText) parts.push(`<span class="lf-time">${esc(durationText)}</span>`);
   if(modelText){
@@ -13071,7 +13076,18 @@ function _transparentTurnFooterHtml(durationText, modelText, ttftText, tokensTex
   }
   if(ttftText) parts.push(`<span class="lf-ttft" title="${esc(t('first_token_time')||'Time to first token')}">TTFT ${esc(ttftText)}</span>`);
   if(tokensText) parts.push(`<span class="lf-tokens">${esc(tokensText)}</span>`);
-  if(statusText) parts.push(`<span class="lf-status">${esc(statusText)}</span>`);
+  // Premature-"Done" fix: while the worker is still alive in ACTIVE_RUNS (the
+  // session reports working=true) the turn is NOT done — reuse the existing live
+  // run-status spinner (tool-card-running-dot / wlpulse) + a short "Working…"
+  // label. Only on true settlement do we fall through to the plain status text.
+  // The label is a plain hardcoded string (not a t() key): adding a new i18n
+  // key would have to be mirrored into every other locale to satisfy the
+  // locale key-coverage parity tests, and those other locales are out of scope.
+  if(working){
+    parts.push(`<span class="lf-status"><span class="live-run-status-dot tool-card-running-dot" aria-hidden="true"></span>&nbsp;<span class="lf-working-label">Working\u2026</span></span>`);
+  }else if(statusText){
+    parts.push(`<span class="lf-status">${esc(statusText)}</span>`);
+  }
   if(!parts.length) return '';
   return `<div class="transparent-turn-footer">${parts.join('<span class="lf-sep">·</span>')}</div>`;
 }
@@ -13092,6 +13108,8 @@ function _renderTransparentTurnFooter(turn, opts){
   const ttftText=opts&&opts.ttftText||'';
   const tokensText=opts&&opts.tokensText||'';
   const statusText=opts&&opts.statusText||(t('done')||'Done');
+  // "Working…" liveness is read directly from S.session.working inside
+  // _transparentTurnFooterHtml (stamped by the server), not passed here.
   const html=_transparentTurnFooterHtml(durationText, modelText, ttftText, tokensText, statusText, modelTitle);
   let footer=turn.querySelector('.transparent-turn-footer');
   if(!html){
@@ -18887,6 +18905,10 @@ function renderMessages(options){
           modelTitle,
           ttftText,
           tokensText,
+          // Premature-"Done" fix: the footer reads S.session.working directly
+          // (stamped by the server on the done frame / GET /api/session) to show
+          // a "Working…" spinner while the agent run is still alive in
+          // ACTIVE_RUNS, falling back to "Done" only on true settlement.
           statusText: t('done')||'Done',
         });
       }else{

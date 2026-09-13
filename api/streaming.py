@@ -87,6 +87,7 @@ from api.models import (
     _message_exact_timestamp_details,
     _message_private_identity_compatible,
     _validated_webui_pending_user_timestamp_identity,
+    _is_session_working,
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
     get_state_db_session_messages,
@@ -14538,7 +14539,22 @@ def _run_agent_streaming(
                 logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
             with _stream_writeback_stage(_writeback_timings, "done_payload"):
                 raw_session = _session_payload_with_full_messages(s, tool_calls=tool_calls)
-                _done_payload = {'session': redact_session_data(raw_session), 'usage': usage}
+                # Premature-"Done" fix: this `done` frame is emitted while the worker
+                # is STILL alive in ACTIVE_RUNS (unregister runs in the `finally`
+                # below), but by now `s.active_stream_id` has already been cleared
+                # (~11641) so the `active_stream_id`-based liveness reports "not
+                # running". Compute the authoritative liveness flag AT THIS INSTANT —
+                # the one correct moment (attach id cleared, ACTIVE_RUNS still
+                # accurate) — and hand it to the client. We stamp it on the SESSION
+                # OBJECT (it survives redact_session_data, which copies unknown keys
+                # through) because the client's footer reads S.session.working after
+                # `S.session = d.session`, and also on the event for a clean contract.
+                _working_now = _is_session_working(
+                    session_id,
+                    active_stream_id=getattr(s, 'active_stream_id', None),
+                )
+                raw_session['working'] = _working_now
+                _done_payload = {'session': redact_session_data(raw_session), 'usage': usage, 'working': _working_now}
                 if _tool_limit_reached:
                     _done_payload['terminal_state'] = 'tool_limit_reached'
                     _done_payload['terminal_reason'] = 'max_iterations'

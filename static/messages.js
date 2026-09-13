@@ -7164,7 +7164,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(_streamFinalized) return returnStatus?'restored':true;
       const session=data&&data.session;
       if(!session) return returnStatus?'missing':false;
-      if(session.active_stream_id||session.pending_user_message) return returnStatus?'active':false;
+      // Premature-"Done" fix: keep the turn ACTIVE while the agent run is still
+      // alive in ACTIVE_RUNS. active_stream_id is cleared before the worker's
+      // finally unregisters the run, so the old two-clause gate settled the turn
+      // early and the footer stamped a fake "Done". working (keyed on
+      // ACTIVE_RUNS, with the 180s stale-unwind ceiling) is the authoritative
+      // liveness signal; it goes false only on true settlement, so a wedged
+      // worker can never hold the turn open forever.
+      if(session.active_stream_id||session.pending_user_message||session.working) return returnStatus?'active':false;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _cancelThrottledSnapshotTimer();
       _clearAnchorProseIncrementalNode();
