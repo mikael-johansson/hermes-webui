@@ -946,6 +946,53 @@ def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> 
 def _is_streaming_session(active_stream_id, active_stream_ids):
     return bool(active_stream_id and active_stream_id in active_stream_ids)
 
+
+def _is_session_working(session_id, active_stream_id=None, active_stream_ids=None):
+    """Return whether a session's agent run is still alive ("working").
+
+    ``ACTIVE_RUNS`` is the authoritative worker-liveness layer: a worker can stay
+    in it (unwinding after cancel, blocked in a provider, or detached from the
+    client) even after ``session.active_stream_id`` has been cleared. The buggy
+    ``_is_streaming_session`` predicate only checks the attach id, so it reports
+    "not running" during exactly that window — and the client settles the turn,
+    stamping a premature "Done" (the premature-Done bug class). This predicate
+    fixes it: a session is *working* iff it has a live, non-stale ``ACTIVE_RUNS``
+    row, OR its attached ``active_stream_id`` is still in the active set.
+
+    The ``ACTIVE_RUNS`` membership check REUSES ``routes._active_run_stream_for_session``
+    (rather than copying it): that helper already maps session_id → live run,
+    carries the 180s stale-unwind ceiling, and anchors the age on ``cancelled_at``
+    for ``phase="cancelling"`` rows — and, crucially, it returns a run id even when
+    the SSE ``STREAMS`` entry is gone (the detached / wedged case), which is the
+    sharpest instance of the bug.
+
+    The attach-id check is evaluated first and short-circuits: when a client is
+    attached and still in the active set the session is unambiguously working,
+    so we skip the heavier ``ACTIVE_RUNS`` scan (and the lazy ``api.routes``
+    import) for the common attached-and-running case. ``active_stream_ids`` may be
+    omitted — it is only fetched when ``active_stream_id`` is truthy, so the
+    detached path (attach id cleared) never pays for a redundant registry scan.
+    """
+    if active_stream_id:
+        if active_stream_ids is None:
+            active_stream_ids = _active_stream_ids()
+        if active_stream_id in (active_stream_ids or set()):
+            return True
+    sid = str(session_id or "").strip()
+    if not sid:
+        return False
+    try:
+        # Lazy import: api.routes imports api.models at module load, so a
+        # top-level ``from api.routes import ...`` here would be circular.
+        # Function-level import mirrors the existing pattern in streaming.py.
+        from api import routes as _routes
+        return _routes._active_run_stream_for_session(sid) is not None
+    except Exception:
+        # Liveness reporting must never raise into a payload builder; fail
+        # closed to "not working" rather than crash the SSE writeback path.
+        return False
+
+
 def _session_sort_timestamp(session):
     if isinstance(session, dict):
         return session.get('last_message_at') or session.get('updated_at') or 0

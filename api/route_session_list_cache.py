@@ -527,6 +527,22 @@ def _session_list_cache_overlay_runtime_rows(rows: list[dict]) -> list[dict]:
                     item[key] = raw_live_value
         stream_id = item.get("active_stream_id")
         item["is_streaming"] = bool(stream_id and stream_id in active_stream_ids)
+        # Premature-"Done" fix: also surface the authoritative worker-liveness flag
+        # so sidebar/list reloads recover the right state. is_streaming above only
+        # reflects the attach id (cleared while the worker is still in ACTIVE_RUNS),
+        # so a detached/unwinding run would read as settled. working is keyed on
+        # ACTIVE_RUNS membership (reusing the 180s-stale-aware mapping).
+        try:
+            from api.models import _is_session_working
+            item["working"] = bool(
+                _is_session_working(
+                    sid,
+                    active_stream_id=stream_id,
+                    active_stream_ids=active_stream_ids,
+                )
+            )
+        except Exception:
+            item["working"] = False
         # #6728: a still-running cron job's session row must not look completed
         # in the sidebar. Cron liveness is only exposed via /api/crons/status,
         # which the sidebar never polls — stamp the flag here so the client can
