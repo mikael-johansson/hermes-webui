@@ -8611,10 +8611,31 @@ function renderSessionListFromCache(){
           childList.appendChild(row);
           continue;
         }
+        const childStreamingInline=_isSessionEffectivelyStreaming(child);
         const row=document.createElement('button');
         row.type='button';
-        row.className='session-child-session'+(activeSidForSidebar&&child.session_id===activeSidForSidebar?' active':'');
-        row.textContent=childLabelFor(child);
+        row.className='session-child-session session-child-session-inline'
+          +(activeSidForSidebar&&child.session_id===activeSidForSidebar?' active':'')
+          +(childStreamingInline?' streaming':'');
+        // The label lives in a flex child so a liveness indicator can sit
+        // beside it without breaking the button's ellipsis (the bare
+        // row.textContent form had no room for a second element).
+        const label=document.createElement('span');
+        label.className='session-child-session-label';
+        label.textContent=childLabelFor(child);
+        row.appendChild(label);
+        // Render the EXISTING is-streaming indicator (same
+        // .session-state-indicator.is-streaming spinner the parent row uses),
+        // routed through the shared liveness combiner so parent rows and
+        // subagent child rows stay consistent — no second indicator.
+        if(childStreamingInline){
+          const state=document.createElement('span');
+          state.className='session-state-indicator session-child-session-state is-streaming';
+          state.setAttribute('aria-hidden','true');
+          const inlineTip=_sessionStateTooltip({isStreaming:true,hasUnread:false});
+          if(inlineTip) state.title=inlineTip;
+          row.appendChild(state);
+        }
         row.title='Open child session';
         row.onclick=async(e)=>{
           e.stopPropagation();
