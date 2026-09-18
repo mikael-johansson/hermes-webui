@@ -727,30 +727,64 @@ _JPEG_SOF_MARKERS = {
 def _is_complete_jpeg(raw: bytes) -> bool:
     if len(raw) < 4 or raw[:2] != b"\xff\xd8":
         return False
+    # A complete JPEG stream must end with an EOI marker (FF D9) as its final
+    # two bytes.  Anything appended after the image (trailing credential
+    # text, junk) fails this test and falls through to normal redaction.
+    #
+    # 2026-09-18 WEDGE FIX: the previous version treated the FIRST FF D9 it
+    # reached as the end of the stream and rejected the file if more bytes
+    # followed.  Phone-camera output routinely concatenates complete JPEG
+    # frames (e.g. a main image plus an appended thumbnail, each ending in
+    # its own EOI and restarting with an FFD8 SOI), and JPEG scan data can
+    # contain coincidental FF D9 bytes (non-conforming encoders skip the
+    # FF 00 byte stuffing).  Both made the validator false-negative on
+    # perfectly valid photos, so their data URIs lost the native-raster
+    # exemption and were handed to the text redactor -- where the agent
+    # redactor's O(n^2) patterns wedged the single-process webui for 10+
+    # minutes per poll.  The rule here: a FF D9 inside the stream is a
+    # genuine frame terminator only if it is the file's final EOI or a new
+    # FFD8 SOI starts immediately after it; any other FFD9 in the scan
+    # region is data and is skipped.  Everything else stays fail-closed.
+    if raw[-2:] != b"\xff\xd9":
+        return False
+    eoi_start = len(raw) - 2  # start of the final FFD9
     pos = 2
     saw_sof = False
     saw_scan = False
-    while pos < len(raw):
-        marker_start = pos
+    frame_boundary = False
+    while pos < eoi_start:
         if raw[pos] != 0xFF:
             return False
-        while pos < len(raw) and raw[pos] == 0xFF:
+        while pos < eoi_start and raw[pos] == 0xFF:
             pos += 1
-        if pos >= len(raw):
+        if pos >= eoi_start:
             return False
         marker = raw[pos]
         pos += 1
         if marker == 0xD9:
-            return saw_sof and saw_scan and pos == len(raw)
-        if marker in {0x00, 0x01, 0xD8} or 0xD0 <= marker <= 0xD7:
+            # EOI before the final EOI: a completed frame.  Legal only if a
+            # new frame (FFD8 SOI) starts immediately after; any other
+            # trailing content means appended data -> redaction path.
+            if raw[pos:pos + 2] == b"\xff\xd8":
+                frame_boundary = True
+                continue
             return False
-        if pos + 2 > len(raw):
+        if marker == 0xD8:
+            # A second SOI is legal only immediately after a frame EOI
+            # (concatenated frames); anywhere else the stream is malformed.
+            if frame_boundary:
+                frame_boundary = False
+                continue
+            return False
+        if marker in {0x00, 0x01} or 0xD0 <= marker <= 0xD7:
+            return False
+        if pos + 2 > eoi_start + 2:
             return False
         segment_length = int.from_bytes(raw[pos:pos + 2], "big")
         if segment_length < 2:
             return False
         segment_end = pos + segment_length
-        if segment_end > len(raw):
+        if segment_end > eoi_start + 2:
             return False
         if marker in _JPEG_SOF_MARKERS:
             if segment_length < 8:
@@ -762,24 +796,43 @@ def _is_complete_jpeg(raw: bytes) -> bool:
 
         saw_scan = True
         pos = segment_end
-        while pos < len(raw):
+        # Walk the entropy-coded scan to the next structural marker.  A
+        # byte-stuffed FF in the data is followed by 0x00 padding (JPEG
+        # spec), and restart markers (0xD0-0xD7) are in-band, so both are
+        # skipped.  A coincidental FF D9 in the data (encoder that skipped
+        # byte stuffing) is data unless the final EOI sits there or a new
+        # FFD8 frame follows it -- treating it as a marker would
+        # false-negative on valid photos.
+        while pos <= eoi_start:
             if raw[pos] != 0xFF:
                 pos += 1
                 continue
             marker_start = pos
-            while pos < len(raw) and raw[pos] == 0xFF:
+            while pos <= eoi_start and raw[pos] == 0xFF:
                 pos += 1
-            if pos >= len(raw):
+            if pos > eoi_start:
+                # The FF run reached the final EOI: legal only if that final
+                # FFD9 terminates this scan (i.e. it IS the last marker).
+                if marker_start == eoi_start and raw[eoi_start + 1] == 0xD9:
+                    pos = eoi_start
+                    break
                 return False
             scan_marker = raw[pos]
             if scan_marker == 0x00 or 0xD0 <= scan_marker <= 0xD7:
                 pos += 1
                 continue
+            if scan_marker == 0xD9:
+                if marker_start == eoi_start or raw[pos + 1:pos + 3] == b"\xff\xd8":
+                    pos = marker_start
+                    break
+                # Coincidental FF D9 in the scan data -- not a marker.
+                pos = marker_start + 2
+                continue
             pos = marker_start
             break
         else:
             return False
-    return False
+    return saw_sof and saw_scan
 
 
 def _gif_subblocks_end(raw: bytes, pos: int) -> int | None:
