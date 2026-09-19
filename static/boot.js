@@ -751,12 +751,21 @@ function _micToastKeyForRecognitionError(error){
   // Persist SR failure across reloads (e.g. Tailscale/network error)
   const _micForceMediaRecorderKey='mic_force_mediarecorder';
   const _micForceMediaRecorderStored=localStorage.getItem(_micForceMediaRecorderKey);
+  // Android's built-in Web Speech API (webkitSpeechRecognition) hard-caps
+  // continuous recognition at ~10-15 words and produces garbage on
+  // non-secure (plain-HTTP, non-localhost) origins. Force the
+  // MediaRecorder -> /api/transcribe (server STT / whisper) path on Android.
+  // Re-landing of the 2026-08-10 fix (commit 2bf31ce6, branch
+  // fix-voice-whisper), which the newer server-STT-probe rewrite dropped.
+  const _isAndroid=/android|linux.*arm/i.test(navigator.userAgent);
   // Prefer Hermes server-side STT (MediaRecorder -> /api/transcribe) only
   // after the server confirms an STT provider is available. No stored key must
   // keep browser SpeechRecognition as the first-click default until then; that
   // avoids dropping the first dictation on installs without server STT.
+  // (Android is exempt from that first-click default: native SR is unusable
+  // there, and the MediaRecorder path needs no secure context.)
   let _serverSttAvailable=false;
-  let _forceMediaRecorder=!SpeechRecognition||(_micForceMediaRecorderStored===null?(_serverSttAvailable&&_canRecordAudio):_micForceMediaRecorderStored==='1');
+  let _forceMediaRecorder=_isAndroid||!SpeechRecognition||(_micForceMediaRecorderStored===null?(_serverSttAvailable&&_canRecordAudio):_micForceMediaRecorderStored==='1');
 
   // Raw audio mode preference: send audio file instead of transcribing
   let _rawAudioMode = localStorage.getItem('hermes-raw-audio-mode') === 'true';
