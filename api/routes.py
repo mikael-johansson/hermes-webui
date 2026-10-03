@@ -25895,7 +25895,40 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
     # has no approval_id, no mirror token, and nothing parked to unblock.
     # See test_subagent_approval_loop.py.
     has_parked_producer = False
+    # Collected inside the lock, applied just after it. approve_session() acquires
+    # _lock itself (tools.approval.approve_session), so it must NOT run while we
+    # already hold _lock, or the resolver deadlocks (the lock is non-reentrant).
+    # This mirrors the Sept-12 Part-1 fix, which also calls approve_session()
+    # outside the lock.
+    _once_consent_keys = []
     with _lock:
+        # The Sept-12 Part-1 consent branch (below) is deliberately
+        # per-card: it records session consent for the specific tokenless
+        # non-blocking-fallback card the click resolves (no approval_id, no
+        # mirror token -> no producer of its own). It must NOT be gated on
+        # the session-wide has_parked_producer flag: a concurrent sibling
+        # producer parked under the same inherited parent key would make
+        # that flag True and silently skip consent, so the child's retry
+        # re-fires the same card (2026-09-30 regression). The flag is kept
+        # only as defense-in-depth: it stays False for genuinely
+        # producer-less sessions and True here only when a sibling is
+        # parked.
+        if choice == "once" and approval_id is None:
+            _q = _pending.get(sid)
+            if isinstance(_q, list):
+                _q = [e for e in _q
+                      if e.get(_GATEWAY_MIRROR_TOKEN) is None
+                      and not str(e.get("approval_id") or "").strip()]
+            elif isinstance(_q, dict) and not str(_q.get("approval_id") or "").strip() \
+                    and _q.get(_GATEWAY_MIRROR_TOKEN) is None:
+                _q = [_q]
+            else:
+                _q = []
+            for _e in _q:
+                _once_consent_keys.extend(
+                    k for k in (_e.get("pattern_keys") or [_e.get("pattern_key", "")]) if k
+                )
+                _e[_GATEWAY_MIRROR_TOKEN] = _GATEWAY_MIRROR_TOKEN  # marker: this click already recorded consent for it
         reconcile_gateway_pending_mirror_locked(sid)
         has_parked_producer = bool(_gateway_queues.get(sid))
         queue = _pending.get(sid)
@@ -26004,6 +26037,13 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
                 _approval_sse_notify_locked(sid, _pending[sid][0], len(_pending[sid]))
             else:
                 _approval_sse_notify_locked(sid, None, 0)
+
+    # Apply the per-card "once" consent collected under the lock, now that the
+    # lock has released (approve_session acquires _lock itself; calling it from
+    # inside the block above would deadlock). Consent is recorded only for the
+    # tokenless non-blocking-fallback card(s) this click targets.
+    for _k in _once_consent_keys:
+        approve_session(sid, _k)
 
     # Collect keys from both _pending and _gateway_queues
     keys_from_pending = pending.get("pattern_keys") or [pending.get("pattern_key", "")] if pending else []
