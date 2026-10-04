@@ -84,3 +84,12 @@ docs/ui-ux/review-shots/
 # Local WebUI runtime data and credentials
 .webui_password
 attachments/
+
+# Ledger-orchestration bookkeeping for the working-indicator effort
+# (isolated manager state: tasks.json / plan.md / notes.md / task.md)
+.hermes-ledger/
+
+# Scratch space for unrelated project work that previously littered the repo root
+# (the WebUI's own working directory doubles as an agent workspace).
+workspace/
+trash/
