@@ -443,6 +443,20 @@ Full list of environment variables:
 
 Extension deployments can inspect sanitized, authenticated diagnostics at `GET /api/extensions/status`; see [WebUI Extensions](docs/EXTENSIONS.md#diagnostics).
 
+### Prefill progress (optional)
+
+For a self-hosted vLLM server that exposes `GET /v1/prefill_progress`, the live run status line can show `Queued · 180.4k prompt`, `Restoring KV · …` or `Prefill 41.2k/180.4k · ETA 1m15s` instead of `Running` while a long prompt is processed. Opt in per server in `config.yaml`:
+
+```yaml
+webui:
+  prefill_progress:
+    poll_seconds: 5            # optional, 2–60
+    enabled_base_urls:
+      - http://my-vllm:8000    # matched against the provider base_url, with or without /v1
+```
+
+The WebUI polls only while a run on a listed server is active, using that provider's API key, and stops polling a server after two consecutive 404s until the next run starts. Gateway-routed runs are not covered. Remove the block to turn it off. Design: [`PREFILL_PROGRESS_WEBUI_SPEC.md`](PREFILL_PROGRESS_WEBUI_SPEC.md).
+
 ---
 
 ### Nix flake and NixOS module
