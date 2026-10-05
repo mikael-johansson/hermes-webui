@@ -196,11 +196,11 @@ def test_decode_stale_drops_rate():
 @node
 @pytest.mark.parametrize("cs,text", [
     # The FINISHED line from the user's ada log.
-    ({"pp_tok_s": 1186.5, "tg_tok_s": 120.0, "queue_wait_s": 0.1}, "PP 1186.5 t/s · TG 120.0 t/s"),
-    ({"pp_tok_s": 2018.0, "tg_tok_s": 124.43, "queue_wait_s": 12.4}, "PP 2018.0 t/s · TG 124.4 t/s · queued 12s"),
-    ({"pp_tok_s": 2018.0, "tg_tok_s": 124.4, "queue_wait_s": 75}, "PP 2018.0 t/s · TG 124.4 t/s · queued 1m15s"),
+    ({"pp_tok_s": 1186.5, "tg_tok_s": 120.0, "queue_wait_s": 0.1}, "PP 1187 t/s · TG 120.0 t/s"),
+    ({"pp_tok_s": 2018.0, "tg_tok_s": 124.43, "queue_wait_s": 12.4}, "PP 2018 t/s · TG 124.4 t/s · queued 12s"),
+    ({"pp_tok_s": 2018.0, "tg_tok_s": 124.4, "queue_wait_s": 75}, "PP 2018 t/s · TG 124.4 t/s · queued 1m15s"),
     ({"pp_tok_s": None, "tg_tok_s": 99.0}, "TG 99.0 t/s"),  # fully cached prompt
-    ({"pp_tok_s": 500.0, "tg_tok_s": None}, "PP 500.0 t/s"),
+    ({"pp_tok_s": 500.0, "tg_tok_s": None}, "PP 500 t/s"),
     ({"pp_tok_s": None, "tg_tok_s": None, "queue_wait_s": 3}, None),
     ({"pp_tok_s": 0, "tg_tok_s": -1}, None),
     (None, None),

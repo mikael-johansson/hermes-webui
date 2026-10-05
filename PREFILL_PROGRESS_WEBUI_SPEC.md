@@ -386,7 +386,7 @@ per captured call. On a mismatch nothing is stamped; the lines stay
 live-only rather than attach to the wrong call.
 
 **UI (transparent stream).**
-- Live: `appendLiveLlmCallStats` inserts `PP 1186.5 t/s · TG 120.0 t/s`
+- Live: `appendLiveLlmCallStats` inserts `PP 1187 t/s · TG 120.0 t/s`
   (plus `· queued 12s` when the queue wait was ≥ 1 s) before
   `#liveRunStatus`, so it lands right after the call that produced it.
   Deduped by request id. The tooltip shows prompt / computed / TTFT / output.

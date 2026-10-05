@@ -456,7 +456,7 @@ webui:
       - http://my-vllm:8000    # matched against the provider base_url, with or without /v1
 ```
 
-Arrival (`Queued`) and admission (`Restoring KV` / `Prefill`) show within about two seconds. If the server also reports per-request speeds (the ada fork's prefill-progress rev 3), decoding shows `467 tokens · 137.3 t/s`, and in the transparent activity view each model call gets a `PP 1186.5 t/s · TG 120.0 t/s` line, kept with the session. The WebUI polls only while a run on a listed server is active, using that provider's API key, and stops polling a server after two consecutive 404s until the next run starts. Gateway-routed runs are not covered. Remove the block to turn it off. Design: [`PREFILL_PROGRESS_WEBUI_SPEC.md`](PREFILL_PROGRESS_WEBUI_SPEC.md).
+Arrival (`Queued`) and admission (`Restoring KV` / `Prefill`) show within about two seconds. If the server also reports per-request speeds (the ada fork's prefill-progress rev 3), decoding shows `467 tokens · 137.3 t/s`, and in the transparent activity view each model call gets a `PP 1187 t/s · TG 120.0 t/s` line, kept with the session. The WebUI polls only while a run on a listed server is active, using that provider's API key, and stops polling a server after two consecutive 404s until the next run starts. Gateway-routed runs are not covered. Remove the block to turn it off. Design: [`PREFILL_PROGRESS_WEBUI_SPEC.md`](PREFILL_PROGRESS_WEBUI_SPEC.md).
 
 ---
 

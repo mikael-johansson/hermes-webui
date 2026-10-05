@@ -15427,7 +15427,7 @@ function _llmCallStatsText(cs){
   const num=v=>{const n=Number(v);return v!==null&&v!==undefined&&Number.isFinite(n)&&n>=0?n:null;};
   const pp=num(cs.pp_tok_s), tg=num(cs.tg_tok_s), q=num(cs.queue_wait_s);
   const parts=[];
-  if(pp!==null&&pp>0) parts.push(t('llm_call_pp',pp.toFixed(1)));
+  if(pp!==null&&pp>0) parts.push(t('llm_call_pp',String(Math.round(pp))));
   if(tg!==null&&tg>0) parts.push(t('llm_call_tg',tg.toFixed(1)));
   if(!parts.length) return null;
   if(q!==null&&q>=1) parts.push(t('llm_call_queued',_formatTurnDuration(q).replace(' ','')));
