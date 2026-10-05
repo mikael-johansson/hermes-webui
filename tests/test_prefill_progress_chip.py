@@ -19,7 +19,7 @@ MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 KEYS = ("prefill_queued", "prefill_progress", "prefill_size", "prefill_restoring", "prefill_ctx_suffix",
         "llm_call_pp", "llm_call_tg", "llm_call_queued", "llm_call_stats_title",
-        "llm_decode_progress", "llm_decode_tokens")
+        "llm_decode_progress", "llm_decode_tokens", "llm_call_pp_n", "llm_call_tg_n")
 
 
 def _en_strings():
@@ -202,6 +202,11 @@ def test_decode_stale_drops_rate():
     ({"pp_tok_s": None, "tg_tok_s": 99.0}, "TG 99.0 t/s"),  # fully cached prompt
     ({"pp_tok_s": 500.0, "tg_tok_s": None}, "PP 500 t/s"),
     ({"pp_tok_s": None, "tg_tok_s": None, "queue_wait_s": 3}, None),
+    # With counts (ada rev 3 always sends them): tokens, then the rate.
+    ({"pp_tok_s": 1601.2, "computed_prompt_tokens": 3628, "tg_tok_s": 127.46, "completion_tokens": 764},
+     "PP 3628 (1601 t/s) · TG 764 (127.5 t/s)"),
+    ({"pp_tok_s": None, "computed_prompt_tokens": 0, "tg_tok_s": 99.0, "completion_tokens": 12},
+     "TG 12 (99.0 t/s)"),
     ({"pp_tok_s": 0, "tg_tok_s": -1}, None),
     (None, None),
 ])

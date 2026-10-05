@@ -15427,8 +15427,13 @@ function _llmCallStatsText(cs){
   const num=v=>{const n=Number(v);return v!==null&&v!==undefined&&Number.isFinite(n)&&n>=0?n:null;};
   const pp=num(cs.pp_tok_s), tg=num(cs.tg_tok_s), q=num(cs.queue_wait_s);
   const parts=[];
-  if(pp!==null&&pp>0) parts.push(t('llm_call_pp',String(Math.round(pp))));
-  if(tg!==null&&tg>0) parts.push(t('llm_call_tg',tg.toFixed(1)));
+  // "PP 3628 (1601 t/s) · TG 764 (127.5 t/s)": tokens actually prefilled
+  // (prompt minus cache) / generated, then the rate; rate only when the
+  // server sent no count.
+  const ppN=num(cs.computed_prompt_tokens), tgN=num(cs.completion_tokens);
+  const ppRate=pp!==null?String(Math.round(pp)):'', tgRate=tg!==null?tg.toFixed(1):'';
+  if(pp!==null&&pp>0) parts.push(ppN!==null?t('llm_call_pp_n',String(Math.round(ppN)),ppRate):t('llm_call_pp',ppRate));
+  if(tg!==null&&tg>0) parts.push(tgN!==null?t('llm_call_tg_n',String(Math.round(tgN)),tgRate):t('llm_call_tg',tgRate));
   if(!parts.length) return null;
   if(q!==null&&q>=1) parts.push(t('llm_call_queued',_formatTurnDuration(q).replace(' ','')));
   const ttft=num(cs.ttft_s);
