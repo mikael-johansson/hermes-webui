@@ -193,7 +193,7 @@ def test_register_racing_poller_exit_leaves_one_poller(monkeypatch):
         pp.register("s1", "sess1", ORIGIN, SECRET, config_data=CFG)
         barrier = threading.Barrier(2)
 
-        def flip():
+        def flip(barrier=barrier):
             barrier.wait()
             pp.register("s2", "sess2", ORIGIN, SECRET, config_data=CFG)
 
