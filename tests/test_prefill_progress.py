@@ -423,3 +423,87 @@ def test_streaming_worker_registers_and_unregisters_in_finally():
     assert all(r < outer_finally for r in regs)
     teardown = body.index("with STREAMS_LOCK:\n            STREAMS.pop(stream_id, None)", unreg)
     assert unreg < teardown
+
+
+# ── adaptive cadence: admission shows within ~fast_poll_seconds ─────────────
+
+def test_settings_fast_poll_defaults_and_clamps():
+    base = {"enabled_base_urls": [ORIGIN]}
+    assert pp._settings({"webui": {"prefill_progress": base}})[1:] == (5.0, 1.0)
+    cfg = {"webui": {"prefill_progress": dict(base, poll_seconds=3, fast_poll_seconds=0.1)}}
+    assert pp._settings(cfg)[1:] == (3.0, 0.5)
+    cfg = {"webui": {"prefill_progress": dict(base, poll_seconds=3, fast_poll_seconds=10)}}
+    assert pp._settings(cfg)[1:] == (3.0, 3.0)  # never slower than poll_seconds
+    cfg = {"webui": {"prefill_progress": dict(base, fast_poll_seconds="x")}}
+    assert pp._settings(cfg)[1:] == (5.0, 1.0)
+
+
+@pytest.mark.parametrize("live,fast", [
+    ([], True),  # call not arrived yet / between tool iterations
+    ([_req(phase="queued", admitted=False, prefill_eta_s=None)], True),
+    ([_req(phase="restoring", restoring_kv=True, prefill_eta_s=None)], True),
+    ([_req(prefill_eta_s=None)], True),  # admitted, no rate sample yet
+    ([_req(phase="mystery")], True),
+    ([_req()], False),  # steady prefill with ETA
+    ([_req(phase="decode", remaining_prompt_tokens=0, prefill_eta_s=None)], False),
+    ([_req(), _req(phase="queued", admitted=False)], True),  # any waiting request
+])
+def test_wants_fast_poll(live, fast):
+    assert pp._wants_fast_poll(live) is fast
+
+
+def test_poll_once_reports_cadence_and_errors_back_off(monkeypatch, no_thread, live_stream):
+    live_stream()
+    http = FakeHTTP(
+        _snap([_req(phase="queued", admitted=False, prefill_eta_s=None)]),
+        _snap([_req()]),
+        500,
+        404,
+    )
+    monkeypatch.setattr(pp.urllib.request, "urlopen", http)
+    pp.register("s1", "sess1", ORIGIN, SECRET, config_data=CFG)
+    assert pp._poll_once(_runs(), 5) is True
+    assert pp._poll_once(_runs(), 5) is False
+    assert pp._poll_once(_runs(), 5) is False  # failures never hammer
+    assert pp._poll_once(_runs(), 5) is False
+
+
+def test_queued_then_admitted_frames(monkeypatch, no_thread, live_stream):
+    """Each fast poll emits, so the queued -> admitted flip reaches the tab
+    on the first poll that sees it."""
+    _, q = live_stream()
+    http = FakeHTTP(
+        _snap([_req(phase="queued", admitted=False, computed_tokens=0, prefill_eta_s=None)], running=0, waiting=1),
+        _snap([_req(phase="restoring", restoring_kv=True, prefill_eta_s=None)]),
+        _snap([_req(prefill_eta_s=None)]),
+    )
+    monkeypatch.setattr(pp.urllib.request, "urlopen", http)
+    pp.register("s1", "sess1", ORIGIN, SECRET, config_data=CFG)
+    phases = []
+    for _ in range(3):
+        pp._poll_once(_runs(), 5)
+        (item,) = _drain(q)
+        r = item[1]["requests"][0]
+        phases.append((r["phase"], r["admitted"]))
+    assert phases == [("queued", False), ("restoring", True), ("prefill", True)]
+
+
+def test_loop_uses_fast_interval_while_waiting(monkeypatch):
+    waits = []
+    real_wait = pp._wake.wait
+
+    def spy(timeout=None):
+        waits.append(timeout)
+        if len(waits) >= 3:
+            pp.unregister("s1")
+        return real_wait(0.01)
+
+    monkeypatch.setattr(pp._wake, "wait", spy)
+    monkeypatch.setattr(pp.urllib.request, "urlopen", FakeHTTP(
+        _snap([]), _snap([_req()]), _snap([_req(phase="queued", admitted=False)]),
+    ))
+    cfg = {"webui": {"prefill_progress": {"enabled_base_urls": [ORIGIN], "poll_seconds": 4, "fast_poll_seconds": 0.75}}}
+    pp.register("s1", "sess1", ORIGIN, SECRET, config_data=cfg)
+    t = pp._thread
+    t.join(timeout=5)
+    assert waits[:3] == [0.75, 4.0, 0.75]

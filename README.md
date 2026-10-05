@@ -450,12 +450,13 @@ For a self-hosted vLLM server that exposes `GET /v1/prefill_progress`, the live 
 ```yaml
 webui:
   prefill_progress:
-    poll_seconds: 5            # optional, 2–60
+    poll_seconds: 5            # optional, 2–60: steady prefill / decode
+    fast_poll_seconds: 1       # optional, 0.5–poll_seconds: until admitted and prefill has an ETA
     enabled_base_urls:
       - http://my-vllm:8000    # matched against the provider base_url, with or without /v1
 ```
 
-The WebUI polls only while a run on a listed server is active, using that provider's API key, and stops polling a server after two consecutive 404s until the next run starts. Gateway-routed runs are not covered. Remove the block to turn it off. Design: [`PREFILL_PROGRESS_WEBUI_SPEC.md`](PREFILL_PROGRESS_WEBUI_SPEC.md).
+Arrival (`Queued`) and admission (`Restoring KV` / `Prefill`) show within about two seconds. The WebUI polls only while a run on a listed server is active, using that provider's API key, and stops polling a server after two consecutive 404s until the next run starts. Gateway-routed runs are not covered. Remove the block to turn it off. Design: [`PREFILL_PROGRESS_WEBUI_SPEC.md`](PREFILL_PROGRESS_WEBUI_SPEC.md).
 
 ---
 

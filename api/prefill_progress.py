@@ -4,7 +4,9 @@ See ``PREFILL_PROGRESS_WEBUI_SPEC.md``. A run whose resolved provider
 ``base_url`` is listed under ``webui.prefill_progress.enabled_base_urls``
 registers here for the lifetime of its worker. While at least one run is
 registered, a single daemon thread GETs the endpoint once per distinct server
-origin every ``poll_seconds`` and pushes an ephemeral ``prefill_progress`` SSE
+origin (every ``fast_poll_seconds`` while waiting for arrival/admission/
+restore/first rate sample, else every ``poll_seconds``) and pushes an
+ephemeral ``prefill_progress`` SSE
 frame to each registered stream.
 
 Ownership and invariants:
@@ -38,6 +40,14 @@ logger = logging.getLogger(__name__)
 EVENT_NAME = "prefill_progress"
 DEFAULT_POLL_SECONDS = 5.0
 MIN_POLL_SECONDS = 2.0
+# Used while the next state change is the interesting one: no live request
+# seen yet (the call has not reached the server, or the agent is between
+# tool iterations), queued, restoring KV, or prefill before the first rate
+# sample. ada refreshes its engine snapshot ~1/s, so admission shows within
+# ~2 s. Steady prefill (ETA known) and decode fall back to poll_seconds.
+DEFAULT_FAST_POLL_SECONDS = 1.0
+MIN_FAST_POLL_SECONDS = 0.5
+_SETTLED_PHASES = ("decode",)
 MAX_POLL_SECONDS = 60.0
 # A snapshot with live requests whose engine stats are older than this is a
 # wedged engine, not progress. While idle the age grows without bound and
@@ -56,6 +66,7 @@ _STREAM_STATE: dict[str, dict] = {}
 _thread: Optional[threading.Thread] = None
 _wake = threading.Event()
 _poll_seconds = DEFAULT_POLL_SECONDS
+_fast_poll_seconds = DEFAULT_FAST_POLL_SECONDS
 
 
 def normalize_origin(url: Any) -> str:
@@ -89,8 +100,10 @@ def normalize_origin(url: Any) -> str:
     return f"{parts.scheme.lower()}://{netloc}"
 
 
-def _settings(config_data: Optional[dict] = None) -> tuple[set[str], float]:
-    """Return (enabled origins, poll seconds) from ``webui.prefill_progress``."""
+def _settings(config_data: Optional[dict] = None) -> tuple[set[str], float, float]:
+    """Return (enabled origins, poll seconds, fast poll seconds) from
+    ``webui.prefill_progress``."""
+    defaults = (set(), DEFAULT_POLL_SECONDS, DEFAULT_FAST_POLL_SECONDS)
     if config_data is None:
         try:
             from api.config import get_config
@@ -98,11 +111,11 @@ def _settings(config_data: Optional[dict] = None) -> tuple[set[str], float]:
             config_data = get_config()
         except Exception:
             logger.debug("prefill_progress: config read failed", exc_info=True)
-            return set(), DEFAULT_POLL_SECONDS
+            return defaults
     webui_cfg = config_data.get("webui") if isinstance(config_data, dict) else None
     block = webui_cfg.get("prefill_progress") if isinstance(webui_cfg, dict) else None
     if not isinstance(block, dict):
-        return set(), DEFAULT_POLL_SECONDS
+        return defaults
     urls = block.get("enabled_base_urls")
     origins = set()
     if isinstance(urls, list):
@@ -110,14 +123,19 @@ def _settings(config_data: Optional[dict] = None) -> tuple[set[str], float]:
             origin = normalize_origin(url)
             if origin:
                 origins.add(origin)
+    poll = _clamped(block.get("poll_seconds"), DEFAULT_POLL_SECONDS, MIN_POLL_SECONDS, MAX_POLL_SECONDS)
+    fast = _clamped(block.get("fast_poll_seconds"), DEFAULT_FAST_POLL_SECONDS, MIN_FAST_POLL_SECONDS, poll)
+    return origins, poll, fast
+
+
+def _clamped(raw: Any, default: float, low: float, high: float) -> float:
     try:
-        poll = float(block.get("poll_seconds", DEFAULT_POLL_SECONDS))
+        value = float(default if raw is None else raw)
     except (TypeError, ValueError):
-        poll = DEFAULT_POLL_SECONDS
-    if poll != poll:  # NaN
-        poll = DEFAULT_POLL_SECONDS
-    poll = min(MAX_POLL_SECONDS, max(MIN_POLL_SECONDS, poll))
-    return origins, poll
+        value = default
+    if value != value:  # NaN
+        value = default
+    return min(high, max(low, value))
 
 
 def register(
@@ -136,10 +154,10 @@ def register(
     """
     if not stream_id or not session_id:
         return False
-    enabled, poll = _settings(config_data)
+    enabled, poll, fast = _settings(config_data)
     origin = normalize_origin(base_url)
     qualifies = bool(origin and origin in enabled and isinstance(api_key, str) and api_key.strip())
-    global _thread, _poll_seconds
+    global _thread, _poll_seconds, _fast_poll_seconds
     start = None
     with _LOCK:
         if not qualifies:
@@ -156,6 +174,7 @@ def register(
             # endpoint on the server is picked up without a WebUI restart.
             _ORIGINS.clear()
             _poll_seconds = poll
+            _fast_poll_seconds = fast
             _wake.clear()
             start = threading.Thread(
                 target=_poll_loop, name="prefill-progress-poller", daemon=True
@@ -195,12 +214,13 @@ def _poll_loop() -> None:
                 _thread = None
                 return
             runs = {sid: dict(run) for sid, run in _RUNS.items()}
-            interval = _poll_seconds
+            interval, fast_interval = _poll_seconds, _fast_poll_seconds
+        fast = False
         try:
-            _poll_once(runs, interval)
+            fast = _poll_once(runs, interval)
         except Exception:
             logger.debug("prefill_progress: poll iteration failed", exc_info=True)
-        _wake.wait(interval)
+        _wake.wait(fast_interval if fast else interval)
         _wake.clear()
 
 
@@ -249,7 +269,26 @@ def _engine_wedged(snapshot: dict) -> bool:
     )
 
 
-def _poll_once(runs: dict, interval: float) -> None:
+def _wants_fast_poll(live: list) -> bool:
+    """True while the next state change (arrival, admission, restore done,
+    first rate sample) is what the user is waiting to see."""
+    if not live:
+        return True
+    for req in live:
+        phase = req.get("phase")
+        if phase in _SETTLED_PHASES:
+            continue
+        eta = req.get("prefill_eta_s")
+        if phase == "prefill" and isinstance(eta, (int, float)) and not isinstance(eta, bool) and eta > 0:
+            continue
+        return True
+    return False
+
+
+def _poll_once(runs: dict, interval: float) -> bool:
+    """Poll each origin once and emit. Returns whether any origin wants the
+    fast cadence (failed or disabled origins never do, so errors back off)."""
+    fast = False
     by_origin: dict[str, list[tuple[str, dict]]] = {}
     for stream_id, run in runs.items():
         by_origin.setdefault(run["origin"], []).append((stream_id, run))
@@ -289,6 +328,7 @@ def _poll_once(runs: dict, interval: float) -> None:
                     "ts": time.time(),
                 }
                 state["last"] = payload
+                fast = fast or _wants_fast_poll(payload["requests"])
             for stream_id, run in members:
                 sstate = _STREAM_STATE.get(stream_id)
                 if sstate is None or stream_id not in _RUNS:
@@ -310,6 +350,7 @@ def _poll_once(runs: dict, interval: float) -> None:
                     frames.append((stream_id, run["session_id"], frame))
         for stream_id, session_id, frame in frames:
             _deliver(stream_id, session_id, dict(frame, stream_id=stream_id, session_id=session_id))
+    return fast
 
 
 def _deliver(stream_id: str, session_id: str, payload: dict) -> bool:

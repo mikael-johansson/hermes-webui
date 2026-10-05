@@ -84,6 +84,7 @@ by re-parsing YAML):
 webui:
   prefill_progress:
     poll_seconds: 5            # optional, default 5, clamp to [2, 60]
+    fast_poll_seconds: 1       # optional, default 1, clamp to [0.5, poll_seconds]
     enabled_base_urls:
       - http://ada.vpn:18020
 ```
@@ -136,7 +137,17 @@ In `api/prefill_progress.py`:
 - Each tick: snapshot `_RUNS` under `_LOCK`, group by `origin`, and do **one**
   GET per distinct origin (not per run) using any registered run's api_key
   for that origin. `urllib.request`, `Authorization: Bearer <key>`, timeout
-  `min(4, poll_seconds - 1)` s. Then sleep `poll_seconds` on the stop event.
+  `min(4, poll_seconds - 1)` s.
+- **Adaptive cadence** (user priority: see admission as soon as it happens).
+  Sleep `fast_poll_seconds` when any successful poll shows no live request
+  (call not arrived yet, or the agent is between tool iterations), or a
+  request that is `queued`, `restoring`, an unknown phase, or `prefill`
+  without an ETA yet. Otherwise (`prefill` with an ETA, `decode`) sleep
+  `poll_seconds`. Failed or disabled origins never select the fast cadence,
+  so errors back off. ada refreshes engine state ~1/s
+  (`PREFILL_PROGRESS_ENGINE_EMIT_S`) and lists a request as `queued` as soon
+  as its frontend receives it, so arrival and admission reach the tab
+  within ~2 s.
 - Never log, emit, or persist the api_key.
 - Run workers only register/unregister; they never wait on the poller.
 
