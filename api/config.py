@@ -11329,6 +11329,25 @@ class StreamChannel:
                 self._SUBSCRIBER_QUEUE_MAXSIZE,
             )
 
+    def put_if_subscribed(self, item: tuple[str, object, None]) -> bool:
+        """Deliver an ephemeral frame to connected tabs only; never buffer it.
+
+        For UI-only state that must not be journaled or replayed (e.g.
+        ``prefill_progress``). With no subscriber the frame is discarded, so it
+        can never evict a real frame from the offline replay buffer or change
+        ``offline_first_event_id``. On a full subscriber queue the ephemeral
+        frame is the one dropped. Pass ``(event, data, None)``: a None event id
+        bypasses the relay's last-event-id dedup that a 2-tuple would inherit.
+        """
+        with self._lock:
+            subscribers = list(self._subscribers)
+        for q in subscribers:
+            try:
+                q.put_nowait(item)
+            except queue.Full:
+                pass
+        return bool(subscribers)
+
     def _diagnostic_counters_locked(self) -> dict[str, object]:
         """Return the counter dict. CALLER CONTRACT: ``self._lock`` is held."""
         return {

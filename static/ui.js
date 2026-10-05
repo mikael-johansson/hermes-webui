@@ -15306,6 +15306,9 @@ function ensureRunActivityGroup(inner, opts){
 // ── LiveFooter timer (module-level singleton) ──────────────────────────────
 const _liveRunStatusTimers={};  // keyed by sessionId, max 1 active
 let _liveRunStatusTokens=null;
+// Latest `prefill_progress` snapshot (see the prefill chip helpers below).
+const _LIVE_RUN_PREFILL_FRESH_MS=15000;
+let _liveRunPrefill=null;
 let _liveRunStatusSessionId=null;
 function _formatRunElapsed(seconds){
   const n=Number(seconds);
@@ -15371,7 +15374,54 @@ function _renderLiveRunStatusContent(el,startedAt){
   const elapsed=startedAt?Math.max(0,now-startedAt):0;
   const timeStr=_formatRunElapsed(elapsed);
   const tokens=_liveRunStatusTokens;
-  el.innerHTML=`<span class="live-run-status-dot tool-card-running-dot"></span><span class="live-run-status-text lf-time">${timeStr}</span>${tokens?`<span class="lf-sep">·</span><span class="lf-tokens">${_fmtTokens(tokens)} tokens</span>`:''}<span class="lf-sep">·</span><span class="lf-status">Running</span>`;
+  const prefill=_liveRunPrefillLabel(_liveRunPrefill,S&&S.activeStreamId,Date.now());
+  const status=prefill
+    ?`<span class="lf-status lf-prefill${prefill.stale?' lf-status-stale':''}" title="${esc(prefill.text)}">${esc(prefill.text)}</span>`
+    :'<span class="lf-status">Running</span>';
+  el.innerHTML=`<span class="live-run-status-dot tool-card-running-dot"></span><span class="live-run-status-text lf-time">${timeStr}</span>${tokens?`<span class="lf-sep">·</span><span class="lf-tokens">${_fmtTokens(tokens)} tokens</span>`:''}<span class="lf-sep">·</span>${status}`;
+}
+// ── Prefill progress chip (PREFILL_PROGRESS_WEBUI_SPEC.md) ──────────────────
+// Latest `prefill_progress` SSE snapshot for the live stream. Ephemeral UI
+// state only: never written to S.session / INFLIGHT / storage, cleared by
+// hideLiveRunStatus. The 1 s live-status timer re-renders it, which also
+// applies the freshness window.
+function setLiveRunPrefill(snapshot){
+  _liveRunPrefill=snapshot||null;
+}
+// Pure: snapshot + current stream id + now(ms) → {text, stale} or null
+// (null = plain "Running"). Upstream contract: ada PREFILL_PROGRESS_SPEC.md.
+function _liveRunPrefillLabel(snap,streamId,nowMs){
+  if(!snap||!streamId||snap.stream_id!==streamId) return null;
+  if(!(nowMs-(Number(snap.receivedAt)||0)<=_LIVE_RUN_PREFILL_FRESH_MS)) return null;
+  const reqs=(Array.isArray(snap.requests)?snap.requests:[]).filter(r=>r&&typeof r==='object'&&r.phase!=='finished');
+  if(!reqs.length) return null;
+  const num=v=>{const n=Number(v);return Number.isFinite(n)&&n>=0?n:null;};
+  // No request-id matching is possible before the first chunk: pick the
+  // request with the most prefill left (ties → most recently arrived).
+  let r=reqs[0];
+  for(const c of reqs.slice(1)){
+    const rc=num(c.remaining_prompt_tokens)||0, rr=num(r.remaining_prompt_tokens)||0;
+    if(rc>rr||(rc===rr&&(num(c.arrived_ms)??Infinity)<(num(r.arrived_ms)??Infinity))) r=c;
+  }
+  const P=num(r.prompt_tokens), R=num(r.remaining_prompt_tokens)||0, C=num(r.cached_tokens), comp=num(r.computed_tokens)||0;
+  if(P==null) return null;
+  const stale=!!snap.stale;
+  // New work = prompt minus cache credit; computed includes that credit.
+  const N=Math.min(P,Math.max(R,P-Math.min(P,C||0)));
+  const D=Math.max(0,Math.min(N,N-R));
+  const ctx=(C&&C>0)?' '+t('prefill_ctx_suffix',_fmtTokens(P)):'';
+  const phase=r.phase;
+  const prefilling=phase==='prefill'||(!['queued','restoring','decode'].includes(phase)&&R>0);
+  let text=null;
+  if(phase==='restoring'||r.restoring_kv===true) text=t('prefill_restoring',_fmtTokens(P));
+  else if(phase==='queued') text=t('prefill_queued',_fmtTokens(P));
+  else if(prefilling){
+    const eta=num(r.prefill_eta_s);
+    text=(eta&&eta>0&&!stale&&phase==='prefill')
+      ?t('prefill_progress',_fmtTokens(D),_fmtTokens(N),_formatTurnDuration(eta).replace(' ',''))+ctx
+      :t('prefill_size',_fmtTokens(N))+ctx;
+  }
+  return text?{text,stale}:null;
 }
 function updateLiveRunStatus(opts){
   if(opts&&opts.sessionId&&_liveRunStatusSessionId&&opts.sessionId!==_liveRunStatusSessionId) return;
@@ -15409,6 +15459,7 @@ function hideLiveRunStatus(sid){
   _clearLiveRunStatusTimer(sid||_liveRunStatusSessionId);
   _liveRunStatusTokens=null;
   _liveRunStatusSessionId=null;
+  _liveRunPrefill=null;
 }
 function _startLiveRunStatusTimer(sid,startedAt){
   if(!sid)return;

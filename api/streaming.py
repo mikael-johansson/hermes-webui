@@ -78,6 +78,7 @@ from api.gateway_chat import WEBUI_LOCAL_CHAT_BACKEND
 from api.metering import meter
 from api.run_journal import RunJournalWriter
 from api.todo_state import attach_todo_state, emit_todo_state
+from api import prefill_progress as _prefill_progress
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
@@ -12461,6 +12462,9 @@ def _run_agent_streaming(
                 tool_progress_callback=on_tool,
                 clarify_callback=_clarify_callback,
             )
+            # Opt-in prefill visibility (webui.prefill_progress): observe the
+            # provider this turn actually resolved. No-op unless allowlisted.
+            _prefill_progress.register(stream_id, session_id, resolved_base_url, resolved_api_key)
             # reasoning_config has been an AIAgent param for several releases,
             # but guard defensively to avoid TypeError on an older agent build.
             if 'reasoning_config' in _agent_params and _reasoning_config is not None:
@@ -13442,6 +13446,7 @@ def _run_agent_streaming(
                             _agent_kwargs['api_key'] = resolved_api_key
                             _agent_kwargs['base_url'] = resolved_base_url
                             _agent_kwargs['model'] = resolved_model
+                            _prefill_progress.register(stream_id, session_id, resolved_base_url, resolved_api_key)
                             _agent_kwargs['provider'] = resolved_provider
                             _replace_session_db_in_kwargs(_agent_kwargs, _state_db_path)
                             if 'api_mode' in _agent_params:
@@ -15254,6 +15259,8 @@ def _run_agent_streaming(
         # CLI/cron env fallback resumes — same lifecycle slot as the env
         # restore above.
         _reset_turn_session_identity(_turn_session_identity_tokens)
+        # Before STREAMS teardown and outside STREAMS_LOCK (its lock is a leaf).
+        _prefill_progress.unregister(stream_id)
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
             CANCEL_FLAGS.pop(stream_id, None)

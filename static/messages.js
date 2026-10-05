@@ -6121,6 +6121,26 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(typeof scheduleTodosRefresh==='function') scheduleTodosRefresh();
     });
 
+    // Opt-in prefill visibility: ephemeral, unjournaled snapshot from the
+    // server's /v1/prefill_progress poller. Stored only in ui.js's live-run
+    // slot (never S.session/INFLIGHT); the live-status line renders it.
+    source.addEventListener('prefill_progress',e=>{
+      let d;
+      try{ d=JSON.parse(e.data||'{}'); }catch(_){ return; }
+      if(!d||typeof d!=='object') return;
+      if(d.session_id&&d.session_id!==activeSid) return;
+      if(d.stream_id!==streamId) return;
+      if(!S.session||S.session.session_id!==activeSid||S.activeStreamId!==streamId) return;
+      if(typeof setLiveRunPrefill!=='function') return;
+      setLiveRunPrefill({
+        stream_id:streamId,
+        requests:Array.isArray(d.requests)?d.requests:[],
+        stale:!!d.stale,
+        receivedAt:Date.now(),
+      });
+      if(typeof updateLiveRunStatus==='function') updateLiveRunStatus({sessionId:activeSid});
+    });
+
     source.addEventListener('approval',e=>{
       const d=JSON.parse(e.data);
       _applyToAnchor('approval',d,e);
