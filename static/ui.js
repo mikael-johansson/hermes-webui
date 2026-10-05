@@ -15431,7 +15431,7 @@ function _llmCallStatsText(cs){
   // (prompt minus cache) / generated, then the rate; rate only when the
   // server sent no count.
   const ppN=num(cs.computed_prompt_tokens), tgN=num(cs.completion_tokens);
-  const ppRate=pp!==null?String(Math.round(pp)):'', tgRate=tg!==null?tg.toFixed(1):'';
+  const ppRate=pp!==null?pp.toFixed(1):'', tgRate=tg!==null?tg.toFixed(1):'';
   if(pp!==null&&pp>0) parts.push(ppN!==null?t('llm_call_pp_n',String(Math.round(ppN)),ppRate):t('llm_call_pp',ppRate));
   if(tg!==null&&tg>0) parts.push(tgN!==null?t('llm_call_tg_n',String(Math.round(tgN)),tgRate):t('llm_call_tg',tgRate));
   if(!parts.length) return null;

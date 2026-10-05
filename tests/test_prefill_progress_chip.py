@@ -196,15 +196,15 @@ def test_decode_stale_drops_rate():
 @node
 @pytest.mark.parametrize("cs,text", [
     # The FINISHED line from the user's ada log.
-    ({"pp_tok_s": 1186.5, "tg_tok_s": 120.0, "queue_wait_s": 0.1}, "PP 1187 t/s · TG 120.0 t/s"),
-    ({"pp_tok_s": 2018.0, "tg_tok_s": 124.43, "queue_wait_s": 12.4}, "PP 2018 t/s · TG 124.4 t/s · queued 12s"),
-    ({"pp_tok_s": 2018.0, "tg_tok_s": 124.4, "queue_wait_s": 75}, "PP 2018 t/s · TG 124.4 t/s · queued 1m15s"),
+    ({"pp_tok_s": 1186.5, "tg_tok_s": 120.0, "queue_wait_s": 0.1}, "PP 1186.5 t/s · TG 120.0 t/s"),
+    ({"pp_tok_s": 2018.0, "tg_tok_s": 124.43, "queue_wait_s": 12.4}, "PP 2018.0 t/s · TG 124.4 t/s · queued 12s"),
+    ({"pp_tok_s": 2018.0, "tg_tok_s": 124.4, "queue_wait_s": 75}, "PP 2018.0 t/s · TG 124.4 t/s · queued 1m15s"),
     ({"pp_tok_s": None, "tg_tok_s": 99.0}, "TG 99.0 t/s"),  # fully cached prompt
-    ({"pp_tok_s": 500.0, "tg_tok_s": None}, "PP 500 t/s"),
+    ({"pp_tok_s": 500.0, "tg_tok_s": None}, "PP 500.0 t/s"),
     ({"pp_tok_s": None, "tg_tok_s": None, "queue_wait_s": 3}, None),
     # With counts (ada rev 3 always sends them): tokens, then the rate.
     ({"pp_tok_s": 1601.2, "computed_prompt_tokens": 3628, "tg_tok_s": 127.46, "completion_tokens": 764},
-     "PP 3628 (1601 t/s) · TG 764 (127.5 t/s)"),
+     "PP 3628 (1601.2 t/s) · TG 764 (127.5 t/s)"),
     ({"pp_tok_s": None, "computed_prompt_tokens": 0, "tg_tok_s": 99.0, "completion_tokens": 12},
      "TG 12 (99.0 t/s)"),
     ({"pp_tok_s": 0, "tg_tok_s": -1}, None),
