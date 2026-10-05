@@ -10516,6 +10516,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # If another thread is already building, wait for its result instead
         # of re-entering the cold path (avoids duplicate 10s zai load_pool calls).
         if should_wait:
+            # A non-forced caller with a fresh memory cache does not need the
+            # in-flight rebuild. That rebuild is often an over-budget
+            # session-visit refresh still probing slow providers out-of-band;
+            # waiting on it pinned POST /api/session/new for 15-20s.
+            if not force_refresh and not _cfg_changed:
+                cached = _get_fresh_memory_models_cache(time.monotonic())
+                if cached is not None:
+                    return cached
             wait_timeout = 60.0
             if force_refresh and force_refresh_started_at is not None:
                 if _LIVE_REBUILD_BUDGET_SECONDS <= 0:

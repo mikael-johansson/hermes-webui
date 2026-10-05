@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import threading
 import time
 
 import pytest
@@ -498,3 +499,76 @@ def test_provider_models_list_of_dicts_without_id_does_not_collapse_catalog(
     assert any(mid.endswith("gpt-5.5") for mid in group_model_ids)
     assert any(mid.endswith("gpt-4.1") for mid in group_model_ids)
     assert any(mid.endswith("gpt-4o") for mid in group_model_ids)
+
+
+def test_plain_caller_serves_fresh_memory_cache_while_out_of_band_rebuild_runs(
+    monkeypatch,
+    isolate_models_catalog_state,
+):
+    """A non-forced caller must not block behind an over-budget rebuild.
+
+    The session-visit refresh (force_refresh=True) returns after the budget but
+    leaves a worker probing providers with _cache_build_in_progress=True.
+    POST /api/session/new then calls get_available_models(); with a fresh
+    memory cache it must return immediately instead of waiting for the worker.
+    """
+    _configure_local_sources(
+        monkeypatch,
+        isolate_models_catalog_state["auth_store_path"],
+    )
+    monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.05, raising=False)
+
+    warm_result = {
+        "active_provider": "openrouter",
+        "default_model": "openrouter/warm-model",
+        "configured_model_badges": {},
+        "groups": [
+            {
+                "provider": "OpenRouter",
+                "provider_id": "openrouter",
+                "models": [{"id": "openrouter/warm-model", "label": "Warm"}],
+            }
+        ],
+        "aliases": {},
+    }
+    live_result = copy.deepcopy(warm_result)
+    live_result["default_model"] = "openrouter/live-model"
+    monkeypatch.setattr(cfg, "_available_models_cache", copy.deepcopy(warm_result), raising=False)
+    monkeypatch.setattr(cfg, "_available_models_cache_ts", time.monotonic(), raising=False)
+    monkeypatch.setattr(
+        cfg,
+        "_available_models_cache_source_fingerprint",
+        "unit-test-fingerprint",
+        raising=False,
+    )
+
+    release_rebuild = threading.Event()
+    rebuild_calls = {"count": 0}
+
+    def _blocked_rebuild(_builder):
+        rebuild_calls["count"] += 1
+        release_rebuild.wait(5.0)
+        return copy.deepcopy(live_result)
+
+    monkeypatch.setattr(cfg, "_invoke_models_rebuild", _blocked_rebuild)
+
+    try:
+        # Session-visit style forced refresh: returns over budget, worker keeps going.
+        cfg.get_available_models(force_refresh=True)
+        assert cfg._cache_build_in_progress is True
+
+        started = time.monotonic()
+        result = cfg.get_available_models()
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 1.0
+        assert result["default_model"] == "openrouter/warm-model"
+        assert rebuild_calls["count"] == 1
+    finally:
+        release_rebuild.set()
+
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and cfg._cache_build_in_progress:
+        time.sleep(0.01)
+    assert cfg._cache_build_in_progress is False
+    assert cfg._available_models_cache["default_model"] == "openrouter/live-model"
