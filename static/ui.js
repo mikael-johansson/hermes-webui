@@ -13090,6 +13090,38 @@ function _transparentTurnFooterHtml(durationText, modelText, ttftText, tokensTex
   if(!parts.length) return '';
   return `<div class="transparent-turn-footer">${parts.join('<span class="lf-sep">·</span>')}</div>`;
 }
+// The done payload stamps S.session.working=true (the worker is still in
+// ACTIVE_RUNS while it emits done) and nothing re-sends the flag after the
+// worker's finally unregisters, so footers stayed on "Working…". Re-check the
+// authoritative flag (/api/session/status `working`) on a bounded backoff and
+// settle the footers when it flips. A newer run owns the flag: skip then.
+const _WORKING_SETTLE_DELAYS_MS=[500,1000,2000,3000,5000,8000,13000,20000,30000];
+const _workingSettleTimers={};
+function _scheduleWorkingSettleCheck(sid,attempt){
+  attempt=attempt||0;
+  if(!sid||attempt>=_WORKING_SETTLE_DELAYS_MS.length) return;
+  clearTimeout(_workingSettleTimers[sid]);
+  _workingSettleTimers[sid]=setTimeout(async()=>{
+    delete _workingSettleTimers[sid];
+    const owns=()=>S.session&&S.session.session_id===sid&&S.session.working&&!S.activeStreamId;
+    if(!owns()) return;
+    let st=null;
+    try{ st=await api(`/api/session/status?session_id=${encodeURIComponent(sid)}`); }catch(_){}
+    if(!owns()) return;
+    if(st&&st.working===false){
+      S.session.working=false;
+      _settleWorkingFooters();
+      return;
+    }
+    _scheduleWorkingSettleCheck(sid,attempt+1);
+  },_WORKING_SETTLE_DELAYS_MS[attempt]);
+}
+function _settleWorkingFooters(){
+  document.querySelectorAll('.transparent-turn-footer .lf-working-label').forEach(label=>{
+    const status=label.closest('.lf-status');
+    if(status) status.textContent=t('done')||'Done';
+  });
+}
 function _renderTransparentTurnFooter(turn, opts){
   if(!turn||!isTransparentStream()) return;
   const blocks=_assistantTurnBlocks(turn);
@@ -15419,9 +15451,46 @@ function _llmCallStatsRow(cs,requestId){
   row.textContent=info.text;
   return row;
 }
-// Live: a model call just finished; put its line at the end of the live
-// turn's rows (before the run-status line), deduped by request id. The
-// settled render rebuilds these from msg._callStats on done/reload.
+// Settled: one line per stamped call (msg._callStats), after the last
+// visible row of that call. Rows don't carry their message index once a
+// recorded activity scene rebuilds them, but tool rows keep the tool-call id
+// (data-tool-disclosure-key="id:<id>") that the message's tool_calls list.
+// A call without tools ends at its own visible segment. No anchor found →
+// no line (never a misplaced one).
+function _llmCallEndRow(root,idx,msg){
+  const visible=el=>!!el&&!el.hidden&&!(el.classList&&el.classList.contains('assistant-segment-worklog-source'))&&!el.closest('[hidden]');
+  const ids=(Array.isArray(msg.tool_calls)?msg.tool_calls:[])
+    .map(tc=>tc&&(tc.id||tc.tool_call_id||tc.call_id)).filter(Boolean);
+  let last=null;
+  for(const id of ids){
+    root.querySelectorAll(`.tool-card-row[data-tool-disclosure-key="${CSS.escape('id:'+id)}"]`).forEach(r=>{
+      if(!visible(r)) return;
+      if(!last||(last.compareDocumentPosition(r)&Node.DOCUMENT_POSITION_FOLLOWING)) last=r;
+    });
+  }
+  if(last) return last;
+  if(ids.length) return null;
+  const seg=root.querySelector(`.assistant-segment[data-msg-idx="${idx}"]`);
+  return visible(seg)?seg:null;
+}
+function _placeLlmCallStatsRows(root){
+  if(!root||typeof isTransparentStream!=='function'||!isTransparentStream()) return;
+  root.querySelectorAll('.llm-call-stats:not([data-live-stream-owned="1"])').forEach(el=>el.remove());
+  const msgs=(S&&S.messages)||[];
+  for(let i=0;i<msgs.length;i++){
+    const m=msgs[i];
+    if(!m||m.role!=='assistant'||!m._callStats) continue;
+    const end=_llmCallEndRow(root,i,m);
+    const row=end&&_llmCallStatsRow(m._callStats);
+    if(row&&end.parentElement) end.parentElement.insertBefore(row,end.nextElementSibling);
+  }
+}
+// Live: a model call just finished. Its stats arrive ~1 s later, possibly
+// after the next call's thinking started, so place it after the newest tool
+// row (a tool-calling call always ends with its tool rows) unless a line
+// already follows that row (then this call had no tools: before the status
+// line). Deduped by request id; the settled render redraws from
+// msg._callStats on done/reload.
 function appendLiveLlmCallStats(d){
   if(!d||!d.stats||typeof isTransparentStream!=='function'||!isTransparentStream()) return;
   const turn=$('liveAssistantTurn');
@@ -15431,6 +15500,13 @@ function appendLiveLlmCallStats(d){
   const row=_llmCallStatsRow(d.stats,d.request_id);
   if(!row) return;
   row.setAttribute('data-live-stream-owned','1');
+  const tools=blocks.querySelectorAll('.tool-card-row');
+  const lastTool=tools.length?tools[tools.length-1]:null;
+  let after=lastTool;
+  for(let n=lastTool&&lastTool.nextElementSibling;n;n=n.nextElementSibling){
+    if(n.classList&&n.classList.contains('llm-call-stats')){ after=null; break; }
+  }
+  if(after&&after.parentElement){ after.parentElement.insertBefore(row,after.nextElementSibling); return; }
   const status=$('liveRunStatus');
   if(status&&status.parentElement===blocks) blocks.insertBefore(row,status);
   else blocks.appendChild(row);
@@ -18778,9 +18854,6 @@ function renderMessages(options){
     }else{
       // ── transparent_stream path: individual expandable event rows ──
       const transparentInsertCursors=new Map();
-      // Last element each model call (assistant message) rendered, for the
-      // per-call PP/TG line placed after it.
-      const transparentCallEnd=new Map();
       // Per-turn dedup of echoed thinking text — mirrors the compact-worklog
       // path's `seenReasons` Set (the transparent branch previously had none,
       // so the same echoed reasoning rendered twice, once out of chronological
@@ -18849,19 +18922,6 @@ function renderMessages(options){
           insertAfterCursor(toolRow);
         }
         _syncTransparentEventControls(turn);
-        transparentCallEnd.set(aIdx,transparentInsertCursors.get(anchorRow)||anchorRow);
-      }
-      // Per-call PP/TG line after each model call's rows (thinking → text →
-      // tools), from msg._callStats (api/prefill_progress.py stamp_call_stats).
-      for(const [rawIdx,seg] of [...assistantSegments.entries()].sort((a,b)=>a[0]-b[0])){
-        const cs=S.messages[rawIdx]&&S.messages[rawIdx]._callStats;
-        const end=transparentCallEnd.get(rawIdx)||seg;
-        if(!cs||!end) continue;
-        const turn=end.closest('.assistant-turn');
-        const blocks=turn?_assistantTurnBlocks(turn):null;
-        const row=_llmCallStatsRow(cs);
-        if(!blocks||!row||end.parentElement!==blocks) continue;
-        blocks.insertBefore(row,end.nextElementSibling);
       }
     }
   }
@@ -18871,6 +18931,9 @@ function renderMessages(options){
       _renderSettledAnchorSceneForMessage(msg, seg, rawIdx);
     }
   }
+  // After every row source (activity loop and recorded anchor scenes), so
+  // the per-call lines follow the rows actually shown.
+  if(typeof _placeLlmCallStatsRows==='function') _placeLlmCallStatsRows(inner);
   _restoreWorklogDetailDisclosureState(inner, worklogDetailDisclosureState);
   // #5839 fix: deferred settled worklogs have no rows yet at restore time, so
   // the disclosure restore above can't reach their detail elements. Stash the

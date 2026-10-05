@@ -1051,6 +1051,14 @@ def undo_last(session_id: str) -> dict[str, Any]:
     }
 
 
+def _session_working_now(s) -> bool:
+    try:
+        from api.models import _is_session_working
+        return bool(_is_session_working(s.session_id, active_stream_id=_live_active_stream_id(s)))
+    except Exception:
+        return False
+
+
 def session_status(session_id: str) -> dict[str, Any]:
     """Return a snapshot of session state for /status.
 
@@ -1096,6 +1104,12 @@ def session_status(session_id: str) -> dict[str, Any]:
         # bookkeeping). Otherwise report None so the poller waits for a REAL
         # server_turn_started instead of latching a ghost.
         'active_stream_id': _live_active_stream_id(s),
+        # Authoritative worker liveness (ACTIVE_RUNS, 180 s stale-aware), the
+        # same predicate the done payload stamps. The done frame is emitted
+        # while the worker is still registered, so it always says True; the
+        # browser re-checks here to settle its "Working…" footer once the
+        # worker's finally has unregistered.
+        'working': _session_working_now(s),
         'input_tokens': inp,
         'output_tokens': out,
         'total_tokens': inp + out,

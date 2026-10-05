@@ -225,18 +225,73 @@ def test_call_stats_listener_and_render_wiring():
     assert "appendLiveLlmCallStats(d)" in body
     for forbidden in ("INFLIGHT", "persistInflightState", "localStorage"):
         assert forbidden not in body, forbidden
-    # Settled transparent render places one line per stamped call, after the
-    # call's own rows (end cursor), from msg._callStats.
-    j = UI_JS.index("const transparentCallEnd=new Map();")
-    k = UI_JS.index("for(const [rawIdx,seg] of assistantSegments){", j)
-    region = UI_JS[j:k]
-    assert "transparentCallEnd.set(aIdx,transparentInsertCursors.get(anchorRow)||anchorRow);" in region
-    assert "S.messages[rawIdx]._callStats" in region
-    assert "blocks.insertBefore(row,end.nextElementSibling);" in region
-    # Live rows dedupe by request id and sit before the run-status line.
+    # Settled: placed by a post-render pass after every row source (activity
+    # loop and recorded anchor scenes, which rebuild rows without message
+    # indexes), keyed by the message's tool-call ids.
+    j = UI_JS.index("_renderSettledAnchorSceneForMessage(msg, seg, rawIdx);")
+    assert "_placeLlmCallStatsRows(inner);" in UI_JS[j:j + 500]
+    f = UI_JS.index("function _llmCallEndRow(")
+    end_fn = UI_JS[f:UI_JS.index("\n}", f)]
+    assert "data-tool-disclosure-key" in end_fn and "'id:'+id" in end_fn
+    assert "assistant-segment-worklog-source" in end_fn  # hidden sources never anchor
+    assert "if(ids.length) return null;" in end_fn  # tools not found: no line
+    # Live rows dedupe by request id; after the newest tool row unless a line
+    # already follows it, else before the run-status line.
     f = UI_JS.index("function appendLiveLlmCallStats(")
     live = UI_JS[f:UI_JS.index("\n}", f)]
     assert "data-request-id" in live and "blocks.insertBefore(row,status)" in live
+    assert "querySelectorAll('.tool-card-row')" in live
     # textContent only: no HTML injection from server numbers.
     g = UI_JS.index("function _llmCallStatsRow(")
     assert "innerHTML" not in UI_JS[g:UI_JS.index("\n}", g)]
+
+
+@node
+def test_working_settle_check_flips_footer_once_server_reports_done():
+    src = """
+const src = %s;
+function extractFunc(name) {
+  const start = src.search(new RegExp('function\\\\s+' + name + '\\\\s*\\\\('));
+  let i = src.indexOf('{', start); let depth = 1; i++;
+  while (depth > 0 && i < src.length) { if (src[i] === '{') depth++; else if (src[i] === '}') depth--; i++; }
+  return src.slice(start, i);
+}
+const delays = [];
+global.setTimeout = (fn, ms) => { delays.push(ms); queue.push(fn); return queue.length; };
+global.clearTimeout = () => {};
+const queue = [];
+const replies = [{working: true}, {working: true}, {working: false}];
+let calls = 0;
+global.api = async (url) => { calls++; return replies.shift(); };
+global.t = (k) => k === 'done' ? 'Done' : k;
+const status = {textContent: 'Working…'};
+const label = {closest: () => status};
+global.document = {querySelectorAll: () => [label]};
+global.S = {session: {session_id: 'a', working: true}, activeStreamId: null};
+const _WORKING_SETTLE_DELAYS_MS=[500,1000,2000,3000,5000,8000,13000,20000,30000];
+const _workingSettleTimers={};
+eval(extractFunc('_scheduleWorkingSettleCheck'));
+eval(extractFunc('_settleWorkingFooters'));
+(async () => {
+  _scheduleWorkingSettleCheck('a');
+  while (queue.length) { await queue.shift()(); }
+  // A newer run owns the flag: no request at all.
+  S.session.working = true; S.activeStreamId = 'new';
+  const before = calls;
+  _scheduleWorkingSettleCheck('a');
+  while (queue.length) { await queue.shift()(); }
+  console.log(JSON.stringify({delays, calls, before, after: calls, working: S.session.working, text: status.textContent}));
+})();
+""" % json.dumps(UI_JS)
+    res = subprocess.run([NODE], input=src, capture_output=True, text=True, timeout=30)
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout)
+    assert out["delays"][:3] == [500, 1000, 2000]
+    assert out["calls"] == 3 and out["before"] == out["after"]
+    assert out["working"] is True  # untouched while the newer run owns it
+    assert out["text"] == "Done"
+
+
+def test_done_handler_schedules_working_settle():
+    i = MESSAGES_JS.index("S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(")
+    assert "_scheduleWorkingSettleCheck(activeSid)" in MESSAGES_JS[i:i + 600]

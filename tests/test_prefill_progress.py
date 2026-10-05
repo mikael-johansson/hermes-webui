@@ -674,3 +674,29 @@ def test_worker_stamps_call_stats_at_settle():
     tail = src[i:i + 800]
     assert "_prefill_progress.stamp_call_stats(" in tail
     assert "_prefill_progress.collect_call_stats(stream_id, wait_s=0.5)" in tail
+
+
+def test_session_status_reports_authoritative_working(monkeypatch):
+    import api.models as models
+    import api.session_ops as ops
+    from types import SimpleNamespace
+
+    seen = {}
+
+    def fake(sid, active_stream_id=None, active_stream_ids=None):
+        seen["args"] = (sid, active_stream_id)
+        return sid == "busy"
+
+    monkeypatch.setattr(models, "_is_session_working", fake)
+    monkeypatch.setattr(ops, "_live_active_stream_id", lambda s: None)
+    assert ops._session_working_now(SimpleNamespace(session_id="busy")) is True
+    assert seen["args"] == ("busy", None)
+    assert ops._session_working_now(SimpleNamespace(session_id="idle")) is False
+
+    def boom(*a, **k):
+        raise RuntimeError("x")
+
+    monkeypatch.setattr(models, "_is_session_working", boom)
+    assert ops._session_working_now(SimpleNamespace(session_id="busy")) is False
+    src = (REPO_ROOT / "api" / "session_ops.py").read_text()
+    assert "'working': _session_working_now(s)," in src
