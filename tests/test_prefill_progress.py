@@ -22,6 +22,8 @@ import api.config as config
 from api import prefill_progress as pp
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+# The no_thread fixture swaps threading.Thread on the shared module object.
+_RealThread = threading.Thread
 ORIGIN = "http://ada.vpn:18020"
 CFG = {"webui": {"prefill_progress": {"enabled_base_urls": [ORIGIN], "poll_seconds": 5}}}
 SECRET = "sk-test-SECRET-do-not-log"
@@ -445,7 +447,8 @@ def test_settings_fast_poll_defaults_and_clamps():
     ([_req(prefill_eta_s=None)], True),  # admitted, no rate sample yet
     ([_req(phase="mystery")], True),
     ([_req()], False),  # steady prefill with ETA
-    ([_req(phase="decode", remaining_prompt_tokens=0, prefill_eta_s=None)], False),
+    # decode keeps the fast cadence so the live TG figure keeps moving
+    ([_req(phase="decode", remaining_prompt_tokens=0, prefill_eta_s=None)], True),
     ([_req(), _req(phase="queued", admitted=False)], True),  # any waiting request
 ])
 def test_wants_fast_poll(live, fast):
@@ -507,3 +510,167 @@ def test_loop_uses_fast_interval_while_waiting(monkeypatch):
     t = pp._thread
     t.join(timeout=5)
     assert waits[:3] == [0.75, 4.0, 0.75]
+
+
+# ── per-call stats (ada spec rev 3) ─────────────────────────────────────────
+
+FINAL = {"computed_prompt_tokens": 1741, "pp_tok_s": 1186.5, "completion_tokens": 601,
+         "tg_tok_s": 120.0, "ttft_s": 1.6, "prefill_s": 1.467, "decode_s": 5.008,
+         "queue_wait_s": 0.1}
+
+
+def _finished(rid, **over):
+    r = _req(request_id=rid, phase="finished", remaining_prompt_tokens=0,
+             prompt_tokens=89933, prefill_eta_s=None, **FINAL)
+    r.update(over)
+    return r
+
+
+def _api_record(session_tag, n, rid):
+    rec = logging.LogRecord(
+        "agent.conversation_loop", logging.INFO, __file__, 1,
+        "API call #%d: model=%s provider=%s in=%d out=%d total=%d latency=%.1fs%s%s",
+        (n, "qwen3.8-27b", "custom", 89933, 601, 90534, 6.8, "", f" id={rid}"), None,
+    )
+    rec.session_tag = session_tag
+    return rec
+
+
+def test_capture_handler_installed_once_on_agent_logger(no_thread):
+    lg = logging.getLogger("agent.conversation_loop")
+    before = [h for h in lg.handlers if isinstance(h, pp._CallLogHandler)]
+    pp.register("s1", "sess1", ORIGIN, SECRET, config_data=CFG)
+    pp.register("s2", "sess2", ORIGIN, SECRET, config_data=CFG)
+    after = [h for h in lg.handlers if isinstance(h, pp._CallLogHandler)]
+    assert len(after) == max(1, len(before))
+
+
+def test_capture_queues_by_session_and_ignores_others(no_thread):
+    pp.register("s1", "sess1", ORIGIN, SECRET, config_data=CFG)
+    pp.register("s2", "sess2", ORIGIN, SECRET, config_data=CFG)
+    h = pp._CallLogHandler()
+    h.emit(_api_record(" [sess1]", 3, "chatcmpl-aaa"))
+    h.emit(_api_record(" [sess1]", 3, "chatcmpl-aaa"))  # duplicate record
+    h.emit(_api_record(" [sess1]", 4, "chatcmpl-bbb"))
+    h.emit(_api_record(" [other]", 1, "chatcmpl-ccc"))
+    h.emit(_api_record("", 1, "chatcmpl-ddd"))  # no session tag
+    noise = logging.LogRecord("agent.conversation_loop", logging.INFO, __file__, 1, "something else", (), None)
+    noise.session_tag = " [sess1]"
+    h.emit(noise)
+    runs = _runs()
+    assert [(c["call"], c["request_id"], c["api_call_number"]) for c in runs["s1"]["calls"]] == [
+        (1, "chatcmpl-aaa", 3), (2, "chatcmpl-bbb", 4)]
+    assert runs["s2"]["calls"] == []
+
+
+def test_call_stats_matched_by_request_id_and_emitted(monkeypatch, no_thread, live_stream):
+    _, q = live_stream()
+    pp.register("s1", "sess1", ORIGIN, SECRET, config_data=CFG)
+    pp.note_model_call("sess1", "chatcmpl-mine", 3)
+    http = FakeHTTP(
+        _snap([_req()]),  # not finished yet
+        # Title generation's call (not captured) finishes too: never attached.
+        _snap([_finished("chatcmpl-title", pp_tok_s=9.9), _finished("chatcmpl-mine")], running=0),
+    )
+    monkeypatch.setattr(pp.urllib.request, "urlopen", http)
+    assert pp._poll_once(_runs(), 5) is True  # pending call -> fast cadence
+    assert [i[0] for i in _drain(q)] == ["prefill_progress"]
+    pp._poll_once(_runs(), 5)
+    items = _drain(q)
+    calls = [i for i in items if i[0] == "llm_call_stats"]
+    assert len(calls) == 1 and calls[0][2] is None
+    d = calls[0][1]
+    assert d["stream_id"] == "s1" and d["session_id"] == "sess1" and d["call"] == 1
+    assert d["request_id"] == "chatcmpl-mine"
+    assert d["stats"]["pp_tok_s"] == 1186.5 and d["stats"]["tg_tok_s"] == 120.0
+    assert d["stats"]["prompt_tokens"] == 89933 and d["stats"]["queue_wait_s"] == 0.1
+    assert SECRET not in json.dumps(d)
+    pp._poll_once(_runs(), 5)
+    assert [i for i in _drain(q) if i[0] == "llm_call_stats"] == []  # once
+
+
+def test_pre_rev3_server_entries_never_match(monkeypatch, no_thread, live_stream):
+    """Finished entries without final stats (ada before rev 3) are ignored;
+    the call times out instead of attaching nulls."""
+    _, q = live_stream()
+    pp.register("s1", "sess1", ORIGIN, SECRET, config_data=CFG)
+    pp.note_model_call("sess1", "chatcmpl-old", 1, now=time.monotonic() - pp.CALL_STATS_TIMEOUT_S - 1)
+    pp.note_model_call("sess1", "chatcmpl-new", 2)
+    legacy = _req(request_id="chatcmpl-new", phase="finished", remaining_prompt_tokens=0)
+    monkeypatch.setattr(pp.urllib.request, "urlopen", FakeHTTP(_snap([legacy], running=0)))
+    pp._poll_once(_runs(), 5)
+    assert [i for i in _drain(q) if i[0] == "llm_call_stats"] == []
+    calls = _runs()["s1"]["calls"]
+    assert calls[0]["done"] is True and calls[0]["stats"] is None  # timed out
+    assert calls[1]["done"] is False
+
+
+def test_collect_waits_bounded_and_returns_in_order(monkeypatch, no_thread):
+    pp.register("s1", "sess1", ORIGIN, SECRET, config_data=CFG)
+    assert pp.collect_call_stats("s1", wait_s=5) == []  # nothing pending: immediate
+    pp.note_model_call("sess1", "chatcmpl-a", 1)
+    pp.note_model_call("sess1", "chatcmpl-b", 2)
+    with pp._LOCK:
+        c = pp._RUNS["s1"]["calls"][0]
+        c["stats"], c["done"] = {"pp_tok_s": 1.0}, True
+    t0 = time.monotonic()
+    out = pp.collect_call_stats("s1", wait_s=0.2)
+    assert 0.15 <= time.monotonic() - t0 < 1.0  # waited for b, bounded
+    assert out == [{"call": 1, "request_id": "chatcmpl-a", "stats": {"pp_tok_s": 1.0}},
+                   {"call": 2, "request_id": "chatcmpl-b", "stats": None}]
+
+    def resolve():
+        time.sleep(0.05)
+        with pp._CALLS_CV:
+            c2 = pp._RUNS["s1"]["calls"][1]
+            c2["stats"], c2["done"] = {"pp_tok_s": 2.0}, True
+            pp._CALLS_CV.notify_all()
+
+    th = _RealThread(target=resolve)
+    th.start()
+    t0 = time.monotonic()
+    out = pp.collect_call_stats("s1", wait_s=2)
+    th.join()
+    assert time.monotonic() - t0 < 1.0  # woke on notify, not the deadline
+    assert out[1]["stats"] == {"pp_tok_s": 2.0}
+    assert pp.collect_call_stats("unknown", wait_s=1) == []
+
+
+def test_provider_switch_keeps_captured_calls(no_thread):
+    pp.register("s1", "sess1", ORIGIN, SECRET, config_data=CFG)
+    pp.note_model_call("sess1", "chatcmpl-a", 1)
+    pp.register("s1", "sess1", ORIGIN + "/v1", SECRET, config_data=CFG)
+    assert [c["request_id"] for c in _runs()["s1"]["calls"]] == ["chatcmpl-a"]
+
+
+def test_stamp_call_stats_only_when_counts_match():
+    def turn(n_asst):
+        msgs = [{"role": "user", "content": "old"}, {"role": "assistant", "content": "old"},
+                {"role": "user", "content": "new"}]
+        for i in range(n_asst):
+            msgs.append({"role": "assistant", "content": f"a{i}"})
+            msgs.append({"role": "tool", "content": "r"})
+        return msgs
+
+    calls = [{"call": 1, "request_id": "r1", "stats": {"pp_tok_s": 1.0}},
+             {"call": 2, "request_id": "r2", "stats": None},
+             {"call": 3, "request_id": "r3", "stats": {"tg_tok_s": 3.0}}]
+    msgs = turn(3)
+    assert pp.stamp_call_stats(msgs, calls) == 2
+    asst = [m for m in msgs if m["role"] == "assistant"]
+    assert "_callStats" not in asst[0]  # previous turn untouched
+    assert asst[1]["_callStats"] == {"pp_tok_s": 1.0, "request_id": "r1"}
+    assert "_callStats" not in asst[2]
+    assert asst[3]["_callStats"] == {"tg_tok_s": 3.0, "request_id": "r3"}
+    mismatch = turn(2)
+    assert pp.stamp_call_stats(mismatch, calls) == 0
+    assert not any("_callStats" in m for m in mismatch)
+    assert pp.stamp_call_stats(turn(1), []) == 0
+
+
+def test_worker_stamps_call_stats_at_settle():
+    src = (REPO_ROOT / "api" / "streaming.py").read_text()
+    i = src.index("_dm['_usedModel'] = _used_model")
+    tail = src[i:i + 800]
+    assert "_prefill_progress.stamp_call_stats(" in tail
+    assert "_prefill_progress.collect_call_stats(stream_id, wait_s=0.5)" in tail

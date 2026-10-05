@@ -15388,6 +15388,53 @@ function _renderLiveRunStatusContent(el,startedAt){
 function setLiveRunPrefill(snapshot){
   _liveRunPrefill=snapshot||null;
 }
+// Per-call PP/TG line (ada spec rev 3 FINISHED numbers). Pure text builder:
+// stats → {text,title} or null when neither rate is known.
+function _llmCallStatsText(cs){
+  if(!cs||typeof cs!=='object') return null;
+  const num=v=>{const n=Number(v);return v!==null&&v!==undefined&&Number.isFinite(n)&&n>=0?n:null;};
+  const pp=num(cs.pp_tok_s), tg=num(cs.tg_tok_s), q=num(cs.queue_wait_s);
+  const parts=[];
+  if(pp!==null&&pp>0) parts.push(t('llm_call_pp',pp.toFixed(1)));
+  if(tg!==null&&tg>0) parts.push(t('llm_call_tg',tg.toFixed(1)));
+  if(!parts.length) return null;
+  if(q!==null&&q>=1) parts.push(t('llm_call_queued',_formatTurnDuration(q).replace(' ','')));
+  const ttft=num(cs.ttft_s);
+  const title=t('llm_call_stats_title',
+    _fmtTokens(num(cs.prompt_tokens)||0),
+    _fmtTokens(num(cs.computed_prompt_tokens)||0),
+    ttft!==null?ttft.toFixed(1)+'s':'–',
+    _fmtTokens(num(cs.completion_tokens)||0));
+  return {text:parts.join(' · '),title};
+}
+function _llmCallStatsRow(cs,requestId){
+  const info=_llmCallStatsText(cs);
+  if(!info) return null;
+  const row=document.createElement('div');
+  row.className='llm-call-stats';
+  row.setAttribute('data-llm-call-stats','1');
+  const rid=requestId||cs.request_id;
+  if(rid) row.setAttribute('data-request-id',String(rid));
+  row.title=info.title;
+  row.textContent=info.text;
+  return row;
+}
+// Live: a model call just finished; put its line at the end of the live
+// turn's rows (before the run-status line), deduped by request id. The
+// settled render rebuilds these from msg._callStats on done/reload.
+function appendLiveLlmCallStats(d){
+  if(!d||!d.stats||typeof isTransparentStream!=='function'||!isTransparentStream()) return;
+  const turn=$('liveAssistantTurn');
+  const blocks=turn?_assistantTurnBlocks(turn):null;
+  if(!blocks) return;
+  if(d.request_id&&blocks.querySelector(`.llm-call-stats[data-request-id="${CSS.escape(String(d.request_id))}"]`)) return;
+  const row=_llmCallStatsRow(d.stats,d.request_id);
+  if(!row) return;
+  row.setAttribute('data-live-stream-owned','1');
+  const status=$('liveRunStatus');
+  if(status&&status.parentElement===blocks) blocks.insertBefore(row,status);
+  else blocks.appendChild(row);
+}
 // Pure: snapshot + current stream id + now(ms) → {text, stale} or null
 // (null = plain "Running"). Upstream contract: ada PREFILL_PROGRESS_SPEC.md.
 function _liveRunPrefillLabel(snap,streamId,nowMs){
@@ -15413,6 +15460,12 @@ function _liveRunPrefillLabel(snap,streamId,nowMs){
   const phase=r.phase;
   const prefilling=phase==='prefill'||(!['queued','restoring','decode'].includes(phase)&&R>0);
   let text=null;
+  if(phase==='decode'){
+    const gen=num(r.generated_tokens), rate=num(r.decode_rate_tok_s);
+    if(gen===null||gen<=0) return null;
+    text=(rate&&rate>0&&!stale)?t('llm_decode_progress',String(gen),rate.toFixed(1)):t('llm_decode_tokens',String(gen));
+    return {text,stale};
+  }
   if(phase==='restoring'||r.restoring_kv===true) text=t('prefill_restoring',_fmtTokens(P));
   else if(phase==='queued') text=t('prefill_queued',_fmtTokens(P));
   else if(prefilling){
@@ -18725,6 +18778,9 @@ function renderMessages(options){
     }else{
       // ── transparent_stream path: individual expandable event rows ──
       const transparentInsertCursors=new Map();
+      // Last element each model call (assistant message) rendered, for the
+      // per-call PP/TG line placed after it.
+      const transparentCallEnd=new Map();
       // Per-turn dedup of echoed thinking text — mirrors the compact-worklog
       // path's `seenReasons` Set (the transparent branch previously had none,
       // so the same echoed reasoning rendered twice, once out of chronological
@@ -18793,6 +18849,19 @@ function renderMessages(options){
           insertAfterCursor(toolRow);
         }
         _syncTransparentEventControls(turn);
+        transparentCallEnd.set(aIdx,transparentInsertCursors.get(anchorRow)||anchorRow);
+      }
+      // Per-call PP/TG line after each model call's rows (thinking → text →
+      // tools), from msg._callStats (api/prefill_progress.py stamp_call_stats).
+      for(const [rawIdx,seg] of [...assistantSegments.entries()].sort((a,b)=>a[0]-b[0])){
+        const cs=S.messages[rawIdx]&&S.messages[rawIdx]._callStats;
+        const end=transparentCallEnd.get(rawIdx)||seg;
+        if(!cs||!end) continue;
+        const turn=end.closest('.assistant-turn');
+        const blocks=turn?_assistantTurnBlocks(turn):null;
+        const row=_llmCallStatsRow(cs);
+        if(!blocks||!row||end.parentElement!==blocks) continue;
+        blocks.insertBefore(row,end.nextElementSibling);
       }
     }
   }

@@ -13957,6 +13957,11 @@ def _run_agent_streaming(
                             if _used_model:
                                 _dm['_usedModel'] = _used_model
                             break
+                    # Opt-in per-call PP/TG (webui.prefill_progress): bounded
+                    # wait only when this run has calls whose stats are pending.
+                    _prefill_progress.stamp_call_stats(
+                        s.messages, _prefill_progress.collect_call_stats(stream_id, wait_s=0.5)
+                    )
                 # Persist context window data on the session so the context-ring
                 # indicator survives a page reload (#1318). Must run BEFORE
                 # s.save() for the same reason as the reasoning trace above.

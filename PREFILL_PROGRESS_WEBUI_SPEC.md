@@ -351,6 +351,54 @@ Manual (before/after evidence per AGENTS.md):
 16. Non-ada provider and ada with `PREFILL_PROGRESS` unset: status line is
     byte-identical to today (regression evidence).
 
+## 3b. Per-call PP/TG and live decode (ada spec rev 3)
+
+Requires ada `PREFILL_PROGRESS_SPEC.md` rev 3 (branch
+`prefill-progress-call-stats`): finished entries carry the FINISHED
+lifecycle line's `pp_tok_s` (over computed prompt tokens), `tg_tok_s`,
+`ttft_s`, `prefill_s`, `decode_s`, `queue_wait_s`, `computed_prompt_tokens`,
+`completion_tokens`; live entries carry `generated_tokens` and
+`decode_rate_tok_s`. Against an older server every new display falls back to
+today's behaviour (keys absent → `Running`, no per-call line).
+
+**Attribution (exact).** hermes-agent logs one INFO record per successful
+model call on `agent.conversation_loop`:
+`API call #N: … id=<response id>`, with `record.session_tag = " [<sid>]"`
+from its per-turn session contextvar. `_CallLogHandler` (installed once on
+that logger) queues `{call, request_id}` on the registered run of that
+session and wakes the poller. The poller matches the ada entry whose
+`request_id` equals that response id and which is `finished` with final
+stats, then emits `llm_call_stats {stream_id, session_id, call, request_id,
+stats}` through the same subscribers-only path. Calls the agent didn't make
+(title generation, other sessions) are never attached. A captured call
+whose entry never appears (pre-rev-3 server, fallback provider) times out
+after 30 s. While any call is pending the poller uses the fast cadence.
+This depends on the agent's log line format; parsing is fail-soft (no
+match → no line).
+
+**Persistence.** At settle the worker calls
+`collect_call_stats(stream_id, wait_s=0.5)`, a bounded wait only while
+this run has pending calls (the last call's stats usually arrive within one
+fast poll because capture wakes the poller), then `stamp_call_stats`, which
+writes `msg._callStats` onto the turn's assistant messages (everything after
+the last user message), **only** when there is exactly one assistant message
+per captured call. On a mismatch nothing is stamped; the lines stay
+live-only rather than attach to the wrong call.
+
+**UI (transparent stream).**
+- Live: `appendLiveLlmCallStats` inserts `PP 1186.5 t/s · TG 120.0 t/s`
+  (plus `· queued 12s` when the queue wait was ≥ 1 s) before
+  `#liveRunStatus`, so it lands right after the call that produced it.
+  Deduped by request id. The tooltip shows prompt / computed / TTFT / output.
+- Settled/reload: the transparent render records the last element each
+  assistant message inserted (thinking → text → tool rows) and places the
+  line after it, from `msg._callStats`.
+- Live decode: the status line shows `467 tokens · 137.3 t/s` in place of
+  `Running` (`467 tokens` while stale or before the first rate sample).
+  Decode now uses the fast cadence so the figure keeps moving.
+- Other activity modes (compact worklog, final-answer only) show no
+  per-call line.
+
 ## 4. Out of scope / follow-ups
 
 - **No ada backend change is required** (checked against the rev 2 spec and

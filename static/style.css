@@ -4531,6 +4531,8 @@ body.resizing .sidebar{transition:none!important;}
 /* Prefill chip in the live status line: truncates before the timer/tokens do. */
 .live-run-status .lf-prefill{min-width:0;flex:0 1 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .live-run-status .lf-status-stale{opacity:.5;}
+/* Per-model-call PP/TG line after each call's rows (transparent stream). */
+.llm-call-stats{margin:0 0 4px;margin-left:var(--msg-rail);max-width:var(--msg-max);font-size:12px;color:var(--muted);opacity:.8;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 @media(max-width:600px){
   .live-run-status{padding-left:0;font-size:12px;}
   .live-footer{padding-left:var(--worklog-rail);font-size:12px;}

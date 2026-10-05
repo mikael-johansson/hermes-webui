@@ -6141,6 +6141,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(typeof updateLiveRunStatus==='function') updateLiveRunStatus({sessionId:activeSid});
     });
 
+    // Per-call PP/TG for a model call that just finished (same opt-in poller).
+    // Live-only DOM; the settled render redraws it from msg._callStats.
+    source.addEventListener('llm_call_stats',e=>{
+      let d;
+      try{ d=JSON.parse(e.data||'{}'); }catch(_){ return; }
+      if(!d||typeof d!=='object') return;
+      if(d.session_id&&d.session_id!==activeSid) return;
+      if(d.stream_id!==streamId) return;
+      if(!S.session||S.session.session_id!==activeSid||S.activeStreamId!==streamId) return;
+      if(typeof appendLiveLlmCallStats==='function') appendLiveLlmCallStats(d);
+    });
+
     source.addEventListener('approval',e=>{
       const d=JSON.parse(e.data);
       _applyToAnchor('approval',d,e);

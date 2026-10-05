@@ -22,12 +22,23 @@ Ownership and invariants:
 - The api key is only ever placed in the outgoing ``Authorization`` header;
   it is never logged, emitted, or persisted.
 - Run workers only call ``register`` / ``unregister``; they never wait on
-  the poller.
+  the poller, except ``collect_call_stats`` at settle, which waits at most
+  its ``wait_s`` and only while this run has calls whose stats are pending.
+
+Per-call stats (PP / TG / TTFT / queue wait, ada spec rev 3): hermes-agent
+logs one ``API call #N: ... id=<response id>`` INFO record per successful
+model call on ``agent.conversation_loop``, tagged with the turn's session id
+(``record.session_tag``). ``_CallLogHandler`` queues that response id on the
+session's registered run; the poller matches it to the server's finished
+entry with the same ``request_id`` (exact, so side calls such as title
+generation never attach to the turn), emits ``llm_call_stats``, and the
+worker stamps the collected stats onto the turn's assistant messages.
 """
 from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 import urllib.error
@@ -55,6 +66,19 @@ MAX_POLL_SECONDS = 60.0
 ENGINE_STALE_AGE_S = 15.0
 _MAX_BODY_BYTES = 1 << 20
 _DISABLE_AFTER_404S = 2
+CALL_STATS_EVENT = "llm_call_stats"
+# Give up on a captured call whose finished entry never shows up (server
+# without rev 3 stats, a fallback provider, or an entry past its TTL).
+CALL_STATS_TIMEOUT_S = 30.0
+_CALL_LOGGER = "agent.conversation_loop"
+_CALL_RE = re.compile(r"^API call #(\d+):")
+_CALL_ID_RE = re.compile(r"\bid=(\S+)")
+_SESSION_TAG_RE = re.compile(r"\[([^\]\s]+)\]")
+# Final-stat keys copied from a finished server entry into llm_call_stats.
+_CALL_STAT_KEYS = (
+    "prompt_tokens", "computed_prompt_tokens", "completion_tokens",
+    "pp_tok_s", "tg_tok_s", "ttft_s", "prefill_s", "decode_s", "queue_wait_s",
+)
 
 _LOCK = threading.Lock()
 # stream_id -> {"session_id", "origin", "api_key"}
@@ -65,6 +89,8 @@ _ORIGINS: dict[str, dict] = {}
 _STREAM_STATE: dict[str, dict] = {}
 _thread: Optional[threading.Thread] = None
 _wake = threading.Event()
+_CALLS_CV = threading.Condition(_LOCK)
+_capture_installed = False
 _poll_seconds = DEFAULT_POLL_SECONDS
 _fast_poll_seconds = DEFAULT_FAST_POLL_SECONDS
 
@@ -163,10 +189,14 @@ def register(
         if not qualifies:
             _drop_locked(stream_id)
             return False
+        prior = _RUNS.get(stream_id)
         _RUNS[stream_id] = {
             "session_id": str(session_id),
             "origin": origin,
             "api_key": api_key.strip(),
+            # Captured model calls, in order (see _CallLogHandler). Kept
+            # across a provider-switch re-register of the same stream.
+            "calls": prior["calls"] if prior and prior.get("session_id") == str(session_id) else [],
         }
         _STREAM_STATE.setdefault(stream_id, {"had_live": False, "stale_sent": False})
         if _thread is None:
@@ -180,9 +210,105 @@ def register(
                 target=_poll_loop, name="prefill-progress-poller", daemon=True
             )
             _thread = start
+    _install_call_capture()
     if start is not None:
         start.start()
     return True
+
+
+class _CallLogHandler(logging.Handler):
+    """Queue each agent model call's response id on its session's run.
+
+    Runs on the agent's thread inside ``logger.info``: cheap prefix check
+    first, never raises, takes only the leaf ``_LOCK``.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = record.msg
+            if not isinstance(msg, str) or not msg.startswith("API call #"):
+                return
+            text = record.getMessage()
+            m_call = _CALL_RE.match(text)
+            m_id = _CALL_ID_RE.search(text)
+            m_sid = _SESSION_TAG_RE.search(str(getattr(record, "session_tag", "") or ""))
+            if not (m_call and m_id and m_sid):
+                return
+            note_model_call(m_sid.group(1), m_id.group(1), int(m_call.group(1)))
+        except Exception:
+            pass
+
+
+def _install_call_capture() -> None:
+    global _capture_installed
+    with _LOCK:
+        if _capture_installed:
+            return
+        _capture_installed = True
+    logging.getLogger(_CALL_LOGGER).addHandler(_CallLogHandler(level=logging.INFO))
+
+
+def note_model_call(session_id: str, response_id: str, api_call_number: int, *, now: Optional[float] = None) -> bool:
+    """Queue one completed model call on every registered run of
+    ``session_id`` (normally exactly one). Returns whether any run took it."""
+    if not session_id or not response_id:
+        return False
+    now = time.monotonic() if now is None else now
+    took = False
+    with _LOCK:
+        for run in _RUNS.values():
+            if run.get("session_id") != session_id:
+                continue
+            calls = run.setdefault("calls", [])
+            if any(c["request_id"] == response_id for c in calls):
+                continue
+            calls.append({
+                "call": len(calls) + 1,
+                "api_call_number": api_call_number,
+                "request_id": response_id,
+                "captured_at": now,
+                "stats": None,
+                "done": False,
+            })
+            took = True
+        if took:
+            _wake.set()  # fetch the finished entry now, not a poll later
+    return took
+
+
+def _pending_calls_locked(run: dict, now: float) -> list:
+    pending = []
+    for c in run.get("calls") or ():
+        if c["done"]:
+            continue
+        if now - c["captured_at"] > CALL_STATS_TIMEOUT_S:
+            c["done"] = True
+            continue
+        pending.append(c)
+    return pending
+
+
+def collect_call_stats(stream_id: str, wait_s: float = 0.5) -> list:
+    """Return this run's captured calls (in order) with whatever stats have
+    arrived, waiting at most ``wait_s`` for pending ones. Each item:
+    ``{"call", "request_id", "stats"}`` (stats None when unavailable)."""
+    deadline = time.monotonic() + max(0.0, wait_s)
+    with _CALLS_CV:
+        while True:
+            run = _RUNS.get(stream_id)
+            if run is None:
+                return []
+            if not _pending_calls_locked(run, time.monotonic()):
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            _wake.set()
+            _CALLS_CV.wait(remaining)
+        return [
+            {"call": c["call"], "request_id": c["request_id"], "stats": dict(c["stats"]) if c["stats"] else None}
+            for c in run.get("calls") or ()
+        ]
 
 
 def unregister(stream_id: str) -> None:
@@ -276,6 +402,9 @@ def _wants_fast_poll(live: list) -> bool:
         return True
     for req in live:
         phase = req.get("phase")
+        if phase == "decode":
+            # Live generated-token count / TG rate: keep it moving.
+            return True
         if phase in _SETTLED_PHASES:
             continue
         eta = req.get("prefill_eta_s")
@@ -304,6 +433,7 @@ def _poll_once(runs: dict, interval: float) -> bool:
         status, data = _fetch(origin, members[0][1]["api_key"], timeout)
         ok = status == 200 and isinstance(data, dict)
         frames: list[tuple[str, str, dict]] = []
+        call_frames: list[tuple[str, str, dict]] = []
         with _LOCK:
             if status == 404:
                 state["consecutive_404"] += 1
@@ -329,6 +459,32 @@ def _poll_once(runs: dict, interval: float) -> bool:
                 }
                 state["last"] = payload
                 fast = fast or _wants_fast_poll(payload["requests"])
+            if ok:
+                by_id = {
+                    r.get("request_id"): r for r in (data.get("requests") or [])
+                    if isinstance(r, dict) and r.get("phase") == "finished"
+                    and r.get("completion_tokens") is not None
+                }
+            now_mono = time.monotonic()
+            for stream_id, run in members:
+                live_run = _RUNS.get(stream_id)
+                if live_run is None:
+                    continue
+                pending = _pending_calls_locked(live_run, now_mono)
+                if pending:
+                    fast = True
+                for c in pending if ok else ():
+                    entry = by_id.get(c["request_id"])
+                    if entry is None:
+                        continue
+                    c["stats"] = {k: entry.get(k) for k in _CALL_STAT_KEYS}
+                    c["done"] = True
+                    call_frames.append((stream_id, run["session_id"], {
+                        "call": c["call"],
+                        "request_id": c["request_id"],
+                        "stats": dict(c["stats"]),
+                    }))
+            _CALLS_CV.notify_all()
             for stream_id, run in members:
                 sstate = _STREAM_STATE.get(stream_id)
                 if sstate is None or stream_id not in _RUNS:
@@ -350,10 +506,13 @@ def _poll_once(runs: dict, interval: float) -> bool:
                     frames.append((stream_id, run["session_id"], frame))
         for stream_id, session_id, frame in frames:
             _deliver(stream_id, session_id, dict(frame, stream_id=stream_id, session_id=session_id))
+        for stream_id, session_id, frame in call_frames:
+            _deliver(stream_id, session_id, dict(frame, stream_id=stream_id, session_id=session_id),
+                     event=CALL_STATS_EVENT)
     return fast
 
 
-def _deliver(stream_id: str, session_id: str, payload: dict) -> bool:
+def _deliver(stream_id: str, session_id: str, payload: dict, event: str = EVENT_NAME) -> bool:
     """Push one ephemeral frame to a live stream's connected tabs.
 
     Snapshots ACTIVE_RUNS and STREAMS under their own locks (never nested,
@@ -372,7 +531,7 @@ def _deliver(stream_id: str, session_id: str, payload: dict) -> bool:
     if not callable(put):
         return False
     try:
-        return bool(put((EVENT_NAME, payload, None)))
+        return bool(put((event, payload, None)))
     except Exception:
         logger.debug("prefill_progress: emit failed for stream %s", stream_id, exc_info=True)
         return False
@@ -391,3 +550,36 @@ def _reset_for_tests() -> None:
     if thread is not None and thread is not threading.current_thread():
         thread.join(timeout=5)
     _wake.clear()
+
+
+def stamp_call_stats(messages: Any, calls: list) -> int:
+    """Stamp ``_callStats`` onto this turn's assistant messages, one per
+    captured model call, in order. The turn is everything after the last
+    user message. Only when the counts match exactly (one assistant message
+    per model call); otherwise nothing is stamped and the stats stay
+    live-only, rather than attaching numbers to the wrong call. Returns the
+    number of messages stamped."""
+    if not calls or not isinstance(messages, list):
+        return 0
+    turn: list = []
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role")
+        if role == "user":
+            break
+        if role == "assistant":
+            turn.append(msg)
+    turn.reverse()
+    if len(turn) != len(calls):
+        logger.debug(
+            "prefill_progress: %d model calls vs %d assistant messages; call stats not persisted",
+            len(calls), len(turn),
+        )
+        return 0
+    stamped = 0
+    for msg, call in zip(turn, calls, strict=True):
+        if call.get("stats"):
+            msg["_callStats"] = dict(call["stats"], request_id=call.get("request_id"))
+            stamped += 1
+    return stamped
