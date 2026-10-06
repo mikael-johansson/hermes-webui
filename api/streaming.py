@@ -5521,21 +5521,26 @@ def _title_prompt_language_rule(user_text: str, pinned_language: Optional[str] =
 
 
 def _title_prompt_emoji_rule() -> str:
-    """Hint that a single leading emoji is welcome when it clearly fits.
+    """Mandate exactly one leading emoji for every generated title.
 
-    Optional by design ("when applicable"): the model is told to add an emoji
-    only when one clearly represents the topic, to keep at most one, and to
-    omit it otherwise. A leading emoji helps the sidebar stay scannable /
-    differentiate conversations. Emoji are not a writing "script", so they are
-    transparent to the cross-script language-drift check, and they are not CJK
-    literals, so the English-only source test is unaffected.
+    Mandatory by design ("always exactly one"): every title must start with
+    exactly one emoji. When an emoji clearly matches the topic the model uses
+    that one; when nothing clearly matches it falls back to the neutral
+    fallback emoji ⬜ (white large square) — exactly that canonical glyph,
+    never a second fallback. The "at most one" bound stays in force: no other
+    emoji is allowed anywhere in the title. A leading emoji helps the sidebar
+    stay scannable / differentiate conversations (and keeps columns aligned).
+    Emoji are not a writing "script", so they are transparent to the
+    cross-script language-drift check, and they are not CJK literals, so the
+    English-only source test is unaffected.
     """
     return (
-        "You may start the title with ONE emoji that clearly matches the topic "
-        "(e.g. 🐍 for Python code, 🗄️ for data or a database, ⛅ for weather). "
-        "Use an emoji only when one clearly fits the topic; otherwise omit it, "
-        "and never use more than one. A single leading emoji is allowed and is "
-        "not the forbidden 'Title:' prefix.\n"
+        "The title MUST start with exactly one emoji. Use one that clearly "
+        "matches the topic (e.g. 🐍 for Python code, 🗄️ for data or a database, "
+        "⛅ for weather); if nothing clearly matches, use the neutral fallback "
+        "emoji ⬜ — exactly this one canonical glyph, never a second fallback. "
+        "Use at most one emoji in the title, and place it leading. A single "
+        "leading emoji is allowed and is not the forbidden 'Title:' prefix.\n"
     )
 
 

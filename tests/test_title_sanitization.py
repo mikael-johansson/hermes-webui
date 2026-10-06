@@ -74,15 +74,16 @@ class TestGeneratedTitleSanitization(unittest.TestCase):
 
 
 class TestEmojiTitleHint(unittest.TestCase):
-    """The title prompt hints at a single leading emoji; downstream guards must
-    keep emoji titles (no strip, no CoT/echo rejection, no script-drift reject)."""
+    """The title prompt mandates exactly one leading emoji (topic match, else
+    the neutral fallback ⬜); downstream guards must keep emoji titles (no
+    strip, no CoT/echo rejection, no script-drift reject)."""
 
     def test_prompt_contains_emoji_rule(self):
         _qa, prompts = _title_prompts("How do I fix a Python import error?", "Check your virtualenv.")
         self.assertEqual(len(prompts), 2)
         for p in prompts:
-            self.assertIn("ONE emoji", p)
-            self.assertIn("never use more than one", p)
+            self.assertIn("MUST start with exactly one emoji", p)
+            self.assertIn("at most one emoji", p)
 
     def test_prompt_examples_include_emoji(self):
         _qa, prompts = _title_prompts("a", "b")
@@ -91,6 +92,29 @@ class TestEmojiTitleHint(unittest.TestCase):
     def test_emoji_rule_has_no_cjk_literals(self):
         rule = _title_prompt_emoji_rule()
         self.assertNotRegex(rule, r"[\u4e00-\u9fff]", "emoji rule must stay English-only")
+
+    def test_emoji_rule_is_mandatory_with_fallback(self):
+        rule = _title_prompt_emoji_rule()
+        # Mandatory: every title starts with exactly one emoji.
+        self.assertIn("MUST start with exactly one emoji", rule)
+        # Neutral fallback is exactly the canonical ⬜ glyph, never a second one.
+        self.assertIn("⬜", rule)
+        self.assertEqual(rule.count("⬜"), 1)
+        self.assertIn("never a second fallback", rule)
+        # "at most one" bound stays in force (no emoji elsewhere in the title).
+        self.assertIn("at most one emoji", rule)
+
+    def test_emoji_rule_embedded_in_first_and_refresh_prompts(self):
+        rule = _title_prompt_emoji_rule()
+        # First-generation path (both prompt variants).
+        _qa, first_prompts = _title_prompts("How do I fix a Python import error?", "Check your virtualenv.")
+        for p in first_prompts:
+            self.assertIn(rule, p)
+        # Refresh path.
+        qa, refresh_prompts = _title_prompts("How do I fix a Python import error?", "Check your virtualenv.",
+                                             None, kind="refresh", current_title="T")
+        self.assertEqual(len(refresh_prompts), 1)
+        self.assertIn(rule, refresh_prompts[0])
 
     def test_sanitizer_keeps_leading_emoji(self):
         self.assertEqual(
