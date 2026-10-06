@@ -317,3 +317,20 @@ def test_working_settle_check_gives_up_after_consecutive_errors_and_yields_to_ne
 def test_done_handler_schedules_working_settle():
     i = MESSAGES_JS.index("S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(")
     assert "_scheduleWorkingSettleCheck(activeSid)" in MESSAGES_JS[i:i + 600]
+
+
+def test_live_call_stats_survive_anchor_scene_repack():
+    """The live anchor scene re-packs its rows above #liveRunStatus on every
+    update, sweeping non-scene nodes (the live PP/TG lines) to the top. Lines
+    remember their tool row and are re-seated after every re-pack."""
+    f = UI_JS.index("function appendLiveLlmCallStats(")
+    live = UI_JS[f:UI_JS.index("\n}", f)]
+    assert "row.setAttribute('data-after-tool-key',key)" in live
+    assert "_relocateLiveCallStats(blocks);" in live
+    g = UI_JS.index("function _relocateLiveCallStats(")
+    reloc = UI_JS[g:UI_JS.index("\n}", g)]
+    assert "data-after-tool-key" in reloc and "data-tool-disclosure-key" in reloc
+    assert "if(anchor.nextElementSibling!==row)" in reloc  # idempotent
+    h = UI_JS.index("function _renderLiveAnchorActivitySceneTransparent(")
+    scene = UI_JS[h:UI_JS.index("\nfunction ", h + 10)]
+    assert scene.index("_relocateLiveCallStats(blocks)") > scene.index("blocks.insertBefore(renderedNode,expectedNextSibling)")

@@ -14427,6 +14427,8 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   preserveByKey.forEach(stale=>stale.remove());
   if(renderedRows.length) _syncTransparentEventControls(turn);
   if(typeof _moveLiveRunStatusToTurnEnd==='function') _moveLiveRunStatusToTurnEnd();
+  // The re-pack above sweeps non-scene rows (live per-call PP/TG lines) to the top.
+  if(typeof _relocateLiveCallStats==='function') _relocateLiveCallStats(blocks);
   _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
   _restoreLiveAnchorScrollSnapshotAfterRebuild(scrollSnapshot,scrollRebuildGuard);
   if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();
@@ -15599,10 +15601,38 @@ function appendLiveLlmCallStats(d){
   for(let n=lastTool&&lastTool.nextElementSibling;n;n=n.nextElementSibling){
     if(n.classList&&n.classList.contains('llm-call-stats')){ after=null; break; }
   }
-  if(after&&after.parentElement){ after.parentElement.insertBefore(row,after.nextElementSibling); return; }
+  // Remember the owning tool row by its tool-call key: the live anchor scene
+  // re-packs its rows on every update and would otherwise sweep this line
+  // (not a scene row) to the top. _relocateLiveCallStats puts it back.
+  const key=after&&after.getAttribute('data-tool-disclosure-key');
+  if(key) row.setAttribute('data-after-tool-key',key);
   const status=$('liveRunStatus');
   if(status&&status.parentElement===blocks) blocks.insertBefore(row,status);
   else blocks.appendChild(row);
+  _relocateLiveCallStats(blocks);
+}
+// Re-seat live per-call lines after their tool row (data-after-tool-key);
+// lines of calls without tools stay just above the run-status line.
+// Idempotent: only moves a line that is out of place.
+function _relocateLiveCallStats(blocks){
+  if(!blocks||!blocks.querySelectorAll) return;
+  const status=$('liveRunStatus');
+  blocks.querySelectorAll('.llm-call-stats[data-live-stream-owned="1"]').forEach(row=>{
+    const key=row.getAttribute('data-after-tool-key');
+    let anchor=null;
+    if(key){
+      const tools=blocks.querySelectorAll(`.tool-card-row[data-tool-disclosure-key="${CSS.escape(key)}"]`);
+      anchor=tools.length?tools[tools.length-1]:null;
+    }
+    if(anchor&&anchor.parentElement){
+      if(anchor.nextElementSibling!==row) anchor.parentElement.insertBefore(row,anchor.nextElementSibling);
+    }else if(!key&&status&&status.parentElement===blocks&&row.parentElement===blocks){
+      // keep untethered lines together, in arrival order, right above the status line
+      let n=row.nextElementSibling;
+      while(n&&n!==status&&n.classList&&n.classList.contains('llm-call-stats')) n=n.nextElementSibling;
+      if(n!==status) blocks.insertBefore(row,status);
+    }
+  });
 }
 // Pure: snapshot + current stream id + now(ms) → {text, stale} or null
 // (null = plain "Running"). Upstream contract: ada PREFILL_PROGRESS_SPEC.md.
