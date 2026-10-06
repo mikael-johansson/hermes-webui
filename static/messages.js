@@ -6141,6 +6141,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(typeof updateLiveRunStatus==='function') updateLiveRunStatus({sessionId:activeSid});
     });
 
+    // Delegated subagents of this session started/finished: "N subagents
+    // working" in the live status line (api/subagent_runs.py).
+    source.addEventListener('subagents_status',e=>{
+      let d;
+      try{ d=JSON.parse(e.data||'{}'); }catch(_){ return; }
+      if(!d||d.session_id!==activeSid) return;
+      if(typeof setSubagentsRunning!=='function') return;
+      setSubagentsRunning(activeSid,d.children);
+      if(typeof updateLiveRunStatus==='function') updateLiveRunStatus({sessionId:activeSid});
+      if(typeof refreshLastTurnFooterStatus==='function') refreshLastTurnFooterStatus();
+    });
+
     // Per-call PP/TG for a model call that just finished (same opt-in poller).
     // Live-only DOM; the settled render redraws it from msg._callStats.
     source.addEventListener('llm_call_stats',e=>{
@@ -8628,6 +8640,51 @@ function startSessionStream(sid) {
         if (typeof loadSession === 'function') {
           void loadSession(sid, {force: true, externalRefreshReason: 'session-updated', keepStaleUntilLoaded: true});
         }
+      } catch (_) {}
+    });
+    // Delegated subagents: a parent whose turn already finished hears its
+    // children start/finish here; a child (no stream of its own) gets its
+    // prefill chip and per-call PP/TG from the poller here. The chip goes into
+    // the "Working…" footer; per-call stats are attached server-side on the
+    // session GET, so a finished call triggers an in-place reload.
+    es.addEventListener('subagents_status', e => {
+      try {
+        const d = JSON.parse(e.data || '{}');
+        if (!d || d.session_id !== sid || typeof setSubagentsRunning !== 'function') return;
+        setSubagentsRunning(sid, d.children);
+        if (!S.session || S.session.session_id !== sid) return;
+        if (typeof updateLiveRunStatus === 'function') updateLiveRunStatus({sessionId: sid});
+        if (typeof refreshLastTurnFooterStatus === 'function') refreshLastTurnFooterStatus();
+      } catch (_) {}
+    });
+    es.addEventListener('prefill_progress', e => {
+      try {
+        const d = JSON.parse(e.data || '{}');
+        if (!d || d.session_id !== sid || d.stream_id !== `child:${sid}`) return;
+        if (!S.session || S.session.session_id !== sid || S.activeStreamId) return;
+        if (typeof setLiveRunPrefill === 'function') setLiveRunPrefill({
+          stream_id: d.stream_id,
+          requests: Array.isArray(d.requests) ? d.requests : [],
+          stale: !!d.stale,
+          receivedAt: Date.now(),
+        });
+        if (typeof refreshLastTurnFooterStatus === 'function') refreshLastTurnFooterStatus();
+      } catch (_) {}
+    });
+    let _childStatsReloadTimer = null;
+    es.addEventListener('llm_call_stats', e => {
+      try {
+        const d = JSON.parse(e.data || '{}');
+        if (!d || d.session_id !== sid || d.stream_id !== `child:${sid}`) return;
+        if (!S.session || S.session.session_id !== sid || S.activeStreamId) return;
+        // Trailing debounce: one reload after a burst, never a dropped last call.
+        clearTimeout(_childStatsReloadTimer);
+        _childStatsReloadTimer = setTimeout(() => {
+          if (!S.session || S.session.session_id !== sid || S.activeStreamId) return;
+          if (typeof loadSession === 'function') {
+            void loadSession(sid, {force: true, externalRefreshReason: 'llm-call-stats', keepStaleUntilLoaded: true});
+          }
+        }, 600);
       } catch (_) {}
     });
     // ── Defect B: live-view of server-initiated (Option Z) turns ──────────

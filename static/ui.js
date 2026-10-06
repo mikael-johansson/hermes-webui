@@ -13067,7 +13067,6 @@ function _transparentTurnFooterHtml(durationText, modelText, ttftText, tokensTex
   // (S.session.working), stamped by the server on the done payload / GET
   // /api/session / session-list overlay. Kept OUT of the param list so this
   // function's 6-param signature stays stable (pinned by test_issue6068).
-  const working=!!(S&&S.session&&S.session.working);
   const parts=[];
   if(durationText) parts.push(`<span class="lf-time">${esc(durationText)}</span>`);
   if(modelText){
@@ -13082,45 +13081,124 @@ function _transparentTurnFooterHtml(durationText, modelText, ttftText, tokensTex
   // label. Only on true settlement do we fall through to the plain status text.
   // The label is a real i18n key ('working'), mirrored into every locale block
   // so the locale key-coverage parity tests stay green.
-  if(working){
-    parts.push(`<span class="lf-status"><span class="live-run-status-dot tool-card-running-dot" aria-hidden="true"></span>&nbsp;<span class="lf-working-label">${t('working')}</span></span>`);
-  }else if(statusText){
-    parts.push(`<span class="lf-status">${esc(statusText)}</span>`);
-  }
+  const statusHtml=_footerStatusHtml(statusText);
+  if(statusHtml) parts.push(statusHtml);
   if(!parts.length) return '';
   return `<div class="transparent-turn-footer">${parts.join('<span class="lf-sep">·</span>')}</div>`;
 }
+// Footer liveness ("Working…", running subagents) is session-wide state, so it
+// belongs on the session's LATEST turn only; older turns always read settled.
+// _renderTransparentTurnFooter sets this around the footer build.
+let _footerRenderingLastTurn=true;
+function _isLastAssistantTurn(turn){
+  const inner=$('msgInner');
+  if(!inner||!turn) return true;
+  const turns=inner.querySelectorAll('.assistant-turn');
+  return turns.length?turns[turns.length-1]===turn:true;
+}
+// Delegated subagents still running per parent session id ({session_id,
+// goal, started_at}[]), from the session GET (subagents_running) and
+// `subagents_status` frames (api/subagent_runs.py).
+const _subagentsRunning={};
+function setSubagentsRunning(sid,children){
+  if(!sid) return;
+  _subagentsRunning[sid]=Array.isArray(children)?children.filter(c=>c&&c.session_id):[];
+}
+function _subagentsRunningFor(sid){ return (sid&&_subagentsRunning[sid])||[]; }
+function _subagentsLabel(n){ return n===1?t('subagents_working_one'):t('subagents_working_many',String(n)); }
+function _subagentsHtml(children){
+  if(!children.length) return '';
+  const title=children.map(c=>String(c.goal||c.session_id)).join('\n');
+  return `<span class="lf-subagents" title="${esc(title)}">${esc(_subagentsLabel(children.length))}</span>`;
+}
+// Status slot of a transparent turn footer: spinner + "Working…" (or the
+// child-view chip) and/or "N subagents working" while live, else the plain
+// settled status text.
+function _footerStatusHtml(statusText){
+  const sid=S&&S.session&&S.session.session_id;
+  const working=_footerRenderingLastTurn&&!!(S&&S.session&&S.session.working);
+  const kids=_footerRenderingLastTurn?_subagentsRunningFor(sid):[];
+  if(working||kids.length){
+    const label=working?_workingFooterLabelHtml():'';
+    const kidsHtml=_subagentsHtml(kids);
+    const sep=(label&&kidsHtml)?'<span class="lf-sep"> · </span>':'';
+    return `<span class="lf-status"><span class="live-run-status-dot tool-card-running-dot" aria-hidden="true"></span>&nbsp;${label}${sep}${kidsHtml}</span>`;
+  }
+  return statusText?`<span class="lf-status">${esc(statusText)}</span>`:'';
+}
+// Stream-less live view (a delegated subagent child): the poller's chip
+// frames arrive on the per-session channel keyed "child:<sid>", and the
+// "Working…" label shows them (Prefill … · ETA / 467 tokens · t/s).
+function _workingFooterChipKey(){
+  return (S&&S.session&&!S.activeStreamId)?`child:${S.session.session_id}`:null;
+}
+function _workingFooterLabelHtml(){
+  const chip=(typeof _liveRunPrefillLabel==='function')
+    ?_liveRunPrefillLabel(_liveRunPrefill,_workingFooterChipKey(),Date.now()):null;
+  if(chip) return `<span class="lf-working-label lf-prefill${chip.stale?' lf-status-stale':''}">${esc(chip.text)}</span>`;
+  return `<span class="lf-working-label">${esc(t('working'))}</span>`;
+}
+// Re-render the status slot of the latest turn's footer in place (liveness,
+// chip, subagent count changed) and settle any older footer left live.
+let _footerStatusChipTimer=null;
+function refreshLastTurnFooterStatus(){
+  const inner=$('msgInner');
+  if(!inner) return;
+  const turns=inner.querySelectorAll('.assistant-turn');
+  const last=turns.length?turns[turns.length-1]:null;
+  const lastFooter=last&&last.querySelector('.transparent-turn-footer');
+  inner.querySelectorAll('.transparent-turn-footer .lf-status').forEach(st=>{
+    if(lastFooter&&lastFooter.contains(st)) return;
+    if(st.querySelector('.live-run-status-dot')) st.textContent=t('done')||'Done';
+  });
+  const st=lastFooter&&lastFooter.querySelector('.lf-status');
+  if(!st) return;
+  _footerRenderingLastTurn=true;
+  const html=_footerStatusHtml(t('done')||'Done');
+  if(html) st.outerHTML=html;
+  // Revert the chip to "Working…" once its snapshot ages out.
+  clearTimeout(_footerStatusChipTimer);
+  _footerStatusChipTimer=null;
+  if(html.indexOf('lf-prefill')>=0) _footerStatusChipTimer=setTimeout(refreshLastTurnFooterStatus,_LIVE_RUN_PREFILL_FRESH_MS+500);
+}
 // The done payload stamps S.session.working=true (the worker is still in
 // ACTIVE_RUNS while it emits done) and nothing re-sends the flag after the
-// worker's finally unregisters, so footers stayed on "Working…". Re-check the
-// authoritative flag (/api/session/status `working`) on a bounded backoff and
-// settle the footers when it flips. A newer run owns the flag: skip then.
+// worker's finally unregisters, so footers stayed on "Working…". A delegated
+// subagent child is "working" with no stream at all. Re-check the
+// authoritative flag (/api/session/working, any session id) on a backoff
+// capped at 30 s for as long as the server says working (a child can run for
+// many minutes), and settle the footer when it flips. Gives up after a few
+// consecutive errors. A newer run owns the flag: skip then.
 const _WORKING_SETTLE_DELAYS_MS=[500,1000,2000,3000,5000,8000,13000,20000,30000];
+const _WORKING_SETTLE_MAX_ERRORS=3;
 const _workingSettleTimers={};
-function _scheduleWorkingSettleCheck(sid,attempt){
-  attempt=attempt||0;
-  if(!sid||attempt>=_WORKING_SETTLE_DELAYS_MS.length) return;
+function _scheduleWorkingSettleCheck(sid,attempt,errors){
+  attempt=attempt||0; errors=errors||0;
+  if(!sid||errors>=_WORKING_SETTLE_MAX_ERRORS) return;
   clearTimeout(_workingSettleTimers[sid]);
+  const delay=_WORKING_SETTLE_DELAYS_MS[Math.min(attempt,_WORKING_SETTLE_DELAYS_MS.length-1)];
   _workingSettleTimers[sid]=setTimeout(async()=>{
     delete _workingSettleTimers[sid];
     const owns=()=>S.session&&S.session.session_id===sid&&S.session.working&&!S.activeStreamId;
     if(!owns()) return;
     let st=null;
-    try{ st=await api(`/api/session/status?session_id=${encodeURIComponent(sid)}`); }catch(_){}
+    try{ st=await api(`/api/session/working?session_id=${encodeURIComponent(sid)}`); }catch(_){}
     if(!owns()) return;
     if(st&&st.working===false){
       S.session.working=false;
       _settleWorkingFooters();
+      // A read-only agent session (delegated child) also picks up its final
+      // messages and last call's PP/TG, which can land after the last nudge.
+      if(S.session.read_only&&typeof loadSession==='function'){
+        void loadSession(sid,{force:true,externalRefreshReason:'working-settled',keepStaleUntilLoaded:true});
+      }
       return;
     }
-    _scheduleWorkingSettleCheck(sid,attempt+1);
-  },_WORKING_SETTLE_DELAYS_MS[attempt]);
+    _scheduleWorkingSettleCheck(sid,attempt+1,st?0:errors+1);
+  },delay);
 }
 function _settleWorkingFooters(){
-  document.querySelectorAll('.transparent-turn-footer .lf-working-label').forEach(label=>{
-    const status=label.closest('.lf-status');
-    if(status) status.textContent=t('done')||'Done';
-  });
+  refreshLastTurnFooterStatus();
 }
 function _renderTransparentTurnFooter(turn, opts){
   if(!turn||!isTransparentStream()) return;
@@ -13140,8 +13218,15 @@ function _renderTransparentTurnFooter(turn, opts){
   const tokensText=opts&&opts.tokensText||'';
   const statusText=opts&&opts.statusText||(t('done')||'Done');
   // "Working…" liveness is read directly from S.session.working inside
-  // _transparentTurnFooterHtml (stamped by the server), not passed here.
-  const html=_transparentTurnFooterHtml(durationText, modelText, ttftText, tokensText, statusText, modelTitle);
+  // _transparentTurnFooterHtml (stamped by the server), not passed here, and
+  // only the latest turn shows it.
+  _footerRenderingLastTurn=_isLastAssistantTurn(turn);
+  let html;
+  try{
+    html=_transparentTurnFooterHtml(durationText, modelText, ttftText, tokensText, statusText, modelTitle);
+  }finally{
+    _footerRenderingLastTurn=true;
+  }
   let footer=turn.querySelector('.transparent-turn-footer');
   if(!html){
     if(footer) footer.remove();
@@ -15410,7 +15495,8 @@ function _renderLiveRunStatusContent(el,startedAt){
   const status=prefill
     ?`<span class="lf-status lf-prefill${prefill.stale?' lf-status-stale':''}" title="${esc(prefill.text)}">${esc(prefill.text)}</span>`
     :'<span class="lf-status">Running</span>';
-  el.innerHTML=`<span class="live-run-status-dot tool-card-running-dot"></span><span class="live-run-status-text lf-time">${timeStr}</span>${tokens?`<span class="lf-sep">·</span><span class="lf-tokens">${_fmtTokens(tokens)} tokens</span>`:''}<span class="lf-sep">·</span>${status}`;
+  const kidsHtml=_subagentsHtml(_subagentsRunningFor(_liveRunStatusSessionId||(S&&S.session&&S.session.session_id)));
+  el.innerHTML=`<span class="live-run-status-dot tool-card-running-dot"></span><span class="live-run-status-text lf-time">${timeStr}</span>${tokens?`<span class="lf-sep">·</span><span class="lf-tokens">${_fmtTokens(tokens)} tokens</span>`:''}<span class="lf-sep">·</span>${status}${kidsHtml?`<span class="lf-sep">·</span>${kidsHtml}`:''}`;
 }
 // ── Prefill progress chip (PREFILL_PROGRESS_WEBUI_SPEC.md) ──────────────────
 // Latest `prefill_progress` SSE snapshot for the live stream. Ephemeral UI

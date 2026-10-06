@@ -4531,6 +4531,10 @@ body.resizing .sidebar{transition:none!important;}
 /* Prefill chip in the live status line: truncates before the timer/tokens do. */
 .live-run-status .lf-prefill{min-width:0;flex:0 1 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--accent);opacity:.9;}
 .live-run-status .lf-status-stale{opacity:.5;}
+.transparent-turn-footer .lf-working-label.lf-prefill{color:var(--accent);opacity:.9;}
+.transparent-turn-footer .lf-working-label.lf-status-stale{opacity:.5;}
+/* "N subagents working" (parent session; tooltip lists the goals). */
+.live-run-status .lf-subagents,.transparent-turn-footer .lf-subagents{color:var(--accent);opacity:.9;white-space:nowrap;}
 /* Run-level "still working" indicator (live status line + Working… footer):
    a spinner, since the shared pulsing dot's 15%-alpha ring barely shows on
    dark themes. Reduced motion gets a slow fade instead of nothing. */
