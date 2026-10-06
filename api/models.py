@@ -1054,7 +1054,13 @@ def _is_session_working(session_id, active_stream_id=None, active_stream_ids=Non
         # top-level ``from api.routes import ...`` here would be circular.
         # Function-level import mirrors the existing pattern in streaming.py.
         from api import routes as _routes
-        return _routes._active_run_stream_for_session(sid) is not None
+        if _routes._active_run_stream_for_session(sid) is not None:
+            return True
+        # A delegated subagent child runs inside its parent's worker and never
+        # gets an ACTIVE_RUNS row of its own; hermes-agent's subagent registry
+        # is its liveness source (api/subagent_runs.py).
+        from api import subagent_runs
+        return subagent_runs.is_running(sid)
     except Exception:
         # Liveness reporting must never raise into a payload builder; fail
         # closed to "not working" rather than crash the SSE writeback path.

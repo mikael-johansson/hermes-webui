@@ -79,6 +79,7 @@ from api.metering import meter
 from api.run_journal import RunJournalWriter
 from api.todo_state import attach_todo_state, emit_todo_state
 from api import prefill_progress as _prefill_progress
+from api import subagent_runs as _subagent_runs
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
@@ -11886,6 +11887,15 @@ def _run_agent_streaming(
                 elif len(cb_args) == 1:
                     name = cb_args[0]
                     event_type = 'tool.started'
+
+                # Delegated subagent progress relayed by hermes-agent (carries
+                # child_session_id / subagent_id): child liveness and live view
+                # (api/subagent_runs.py). Observe only; handling below unchanged.
+                if isinstance(event_type, str) and event_type.startswith('subagent'):
+                    _subagent_runs.note_progress(
+                        event_type, cb_kwargs,
+                        parent_session_id=session_id, parent_stream_id=stream_id,
+                    )
 
                 if event_type in ('reasoning.available', '_thinking'):
                     reason_text = preview if event_type == 'reasoning.available' else name
