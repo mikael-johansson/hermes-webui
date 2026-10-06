@@ -700,6 +700,15 @@ def _session_list_cache_overlay_runtime_rows(rows: list[dict]) -> list[dict]:
                     item[key] = raw_live_value
         stream_id = item.get("active_stream_id")
         item["is_streaming"] = bool(stream_id and stream_id in active_stream_ids)
+        if not item["is_streaming"] and sid:
+            # A delegated subagent child never has a stream of its own; its
+            # liveness is hermes-agent's subagent registry. Evaluated here, at
+            # response time, so the cached payload can't freeze it.
+            try:
+                from api import subagent_runs
+                item["is_streaming"] = subagent_runs.is_running(sid)
+            except Exception:
+                pass
         # Premature-"Done" fix: also surface the authoritative worker-liveness flag
         # so sidebar/list reloads recover the right state. is_streaming above only
         # reflects the attach id (cleared while the worker is still in ACTIVE_RUNS),
