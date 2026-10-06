@@ -359,7 +359,7 @@ I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 
-def _footer_status(session, kids, last=True, chip=None):
+def _footer_status(session, kids, last=True, chip=None, finished_at=None):
     src = """
 const src = %s;
 function extractFunc(name) {
@@ -373,6 +373,9 @@ global.esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/
 global.t = (k, ...a) => ({working: 'Working…', subagents_working_one: '1 subagent working',
   subagents_working_many: '{0} subagents working'}[k] || k).replace('{0}', a[0]);
 let _footerRenderingLastTurn = %s;
+let _footerFinishedAt = %s;
+global._formatMessageFooterTimestamp = (ts) => 'T' + ts;
+global._activityFullClockLabel = (ts) => 'FULL' + ts;
 const _subagentsRunning = {};
 const _LIVE_RUN_PREFILL_FRESH_MS = 15000;
 const _liveRunPrefill = null;
@@ -382,7 +385,7 @@ for (const f of ['setSubagentsRunning','_subagentsRunningFor','_subagentsLabel',
 setSubagentsRunning('P', %s);
 console.log(JSON.stringify(_footerStatusHtml('Done')));
 """ % (json.dumps(UI_JS), json.dumps(session), "true" if last else "false",
-       json.dumps(chip), json.dumps(kids))
+       json.dumps(finished_at), json.dumps(chip), json.dumps(kids))
     res = subprocess.run([NODE], input=src, capture_output=True, text=True, timeout=30)
     assert res.returncode == 0, res.stderr
     return json.loads(res.stdout)
@@ -431,3 +434,22 @@ def test_client_wiring():
     working = len(re.findall(r"\n    working: '", I18N_JS))
     for k in ("subagents_working_one", "subagents_working_many"):
         assert len(re.findall(r"\n    %s: '" % k, I18N_JS)) == working >= 15, k
+
+
+@node
+def test_settled_footer_shows_finish_time():
+    html = _footer_status({"session_id": "P", "working": False}, [], finished_at=1791273718)
+    assert html == ('<span class="lf-status">Done<span class="lf-sep"> · </span>'
+                    '<span class="lf-finished" title="FULL1791273718">T1791273718</span></span>')
+    # Not while live, and nothing without a timestamp.
+    live = _footer_status({"session_id": "P", "working": True}, [], finished_at=1791273718)
+    assert "lf-finished" not in live and "Working…" in live
+    assert _footer_status({"session_id": "P", "working": False}, []) == '<span class="lf-status">Done</span>'
+
+
+def test_finish_time_wiring():
+    assert "finishedAt: msg?((msg._ts!==undefined&&msg._ts!==null)?msg._ts:msg.timestamp):null," in UI_JS
+    assert "footer.setAttribute('data-finished-at',String(opts.finishedAt));" in UI_JS
+    f = UI_JS.index("function refreshLastTurnFooterStatus(")
+    body = UI_JS[f:UI_JS.index("\n}", f)]
+    assert body.count("getAttribute('data-finished-at')") == 2  # latest + older footers

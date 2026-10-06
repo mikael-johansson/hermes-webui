@@ -4503,6 +4503,7 @@ body.resizing .sidebar{transition:none!important;}
 .transparent-turn-footer .lf-status{color:var(--muted);opacity:.85;}
 .transparent-turn-footer .lf-model{color:var(--muted);opacity:.85;}
 .transparent-turn-footer .lf-ttft{color:var(--accent);opacity:.9;}
+.transparent-turn-footer .lf-finished{font-variant-numeric:tabular-nums;}
 .transparent-turn-footer .lf-tokens{font-variant-numeric:tabular-nums;}
 
 /* ── Manual compression cards (transient transcript-local feedback) ── */

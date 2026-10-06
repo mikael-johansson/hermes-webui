@@ -13092,6 +13092,9 @@ function _transparentTurnFooterHtml(durationText, modelText, ttftText, tokensTex
 // belongs on the session's LATEST turn only; older turns always read settled.
 // _renderTransparentTurnFooter sets this around the footer build.
 let _footerRenderingLastTurn=true;
+// Finish time (epoch seconds) of the footer being built; shown after the
+// settled status ("Done · 11:42"). Set around the build like the flag above.
+let _footerFinishedAt=null;
 function _isLastAssistantTurn(turn){
   const inner=$('msgInner');
   if(!inner||!turn) return true;
@@ -13126,7 +13129,13 @@ function _footerStatusHtml(statusText){
     const sep=(label&&kidsHtml)?'<span class="lf-sep"> · </span>':'';
     return `<span class="lf-status"><span class="live-run-status-dot tool-card-running-dot" aria-hidden="true"></span>&nbsp;${label}${sep}${kidsHtml}</span>`;
   }
-  return statusText?`<span class="lf-status">${esc(statusText)}</span>`:'';
+  if(!statusText) return '';
+  // Inside the status span so in-place status refreshes replace it whole.
+  const at=Number(_footerFinishedAt);
+  const when=(Number.isFinite(at)&&at>0&&typeof _formatMessageFooterTimestamp==='function')?_formatMessageFooterTimestamp(at):'';
+  const whenTitle=when&&typeof _activityFullClockLabel==='function'?_activityFullClockLabel(at):'';
+  const whenHtml=when?`<span class="lf-sep"> · </span><span class="lf-finished"${whenTitle?` title="${esc(whenTitle)}"`:''}>${esc(when)}</span>`:'';
+  return `<span class="lf-status">${esc(statusText)}${whenHtml}</span>`;
 }
 // Stream-less live view (a delegated subagent child): the poller's chip
 // frames arrive on the per-session channel keyed "child:<sid>", and the
@@ -13151,12 +13160,18 @@ function refreshLastTurnFooterStatus(){
   const lastFooter=last&&last.querySelector('.transparent-turn-footer');
   inner.querySelectorAll('.transparent-turn-footer .lf-status').forEach(st=>{
     if(lastFooter&&lastFooter.contains(st)) return;
-    if(st.querySelector('.live-run-status-dot')) st.textContent=t('done')||'Done';
+    if(!st.querySelector('.live-run-status-dot')) return;
+    const footer=st.closest('.transparent-turn-footer');
+    _footerRenderingLastTurn=false;
+    _footerFinishedAt=footer&&footer.getAttribute('data-finished-at');
+    try{ st.outerHTML=_footerStatusHtml(t('done')||'Done'); }finally{ _footerRenderingLastTurn=true; _footerFinishedAt=null; }
   });
   const st=lastFooter&&lastFooter.querySelector('.lf-status');
   if(!st) return;
   _footerRenderingLastTurn=true;
-  const html=_footerStatusHtml(t('done')||'Done');
+  _footerFinishedAt=lastFooter.getAttribute('data-finished-at');
+  let html;
+  try{ html=_footerStatusHtml(t('done')||'Done'); }finally{ _footerFinishedAt=null; }
   if(html) st.outerHTML=html;
   // Revert the chip to "Working…" once its snapshot ages out.
   clearTimeout(_footerStatusChipTimer);
@@ -13223,11 +13238,13 @@ function _renderTransparentTurnFooter(turn, opts){
   // _transparentTurnFooterHtml (stamped by the server), not passed here, and
   // only the latest turn shows it.
   _footerRenderingLastTurn=_isLastAssistantTurn(turn);
+  _footerFinishedAt=opts&&opts.finishedAt||null;
   let html;
   try{
     html=_transparentTurnFooterHtml(durationText, modelText, ttftText, tokensText, statusText, modelTitle);
   }finally{
     _footerRenderingLastTurn=true;
+    _footerFinishedAt=null;
   }
   let footer=turn.querySelector('.transparent-turn-footer');
   if(!html){
@@ -13247,6 +13264,9 @@ function _renderTransparentTurnFooter(turn, opts){
     }
   }
   footer.innerHTML=html.replace(/^<div class="transparent-turn-footer">|<\/div>$/g,'');
+  // Kept for in-place status refreshes (refreshLastTurnFooterStatus).
+  if(opts&&opts.finishedAt) footer.setAttribute('data-finished-at',String(opts.finishedAt));
+  else footer.removeAttribute('data-finished-at');
 }
 // ── Activity-group user expand intent (#1298) ──────────────────────────────
 // When the user manually expands the live "Activity" dropdown during streaming,
@@ -19215,6 +19235,8 @@ function renderMessages(options){
           // a "Working…" spinner while the agent run is still alive in
           // ACTIVE_RUNS, falling back to "Done" only on true settlement.
           statusText: t('done')||'Done',
+          // When the turn finished: its final message's timestamp.
+          finishedAt: msg?((msg._ts!==undefined&&msg._ts!==null)?msg._ts:msg.timestamp):null,
         });
       }else{
         // No transparent rows → no footer needed.
