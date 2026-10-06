@@ -13081,7 +13081,9 @@ function _transparentTurnFooterHtml(durationText, modelText, ttftText, tokensTex
   // label. Only on true settlement do we fall through to the plain status text.
   // The label is a real i18n key ('working'), mirrored into every locale block
   // so the locale key-coverage parity tests stay green.
-  const statusHtml=_footerStatusHtml(statusText);
+  const statusHtml=(typeof _footerStatusHtml==='function')
+    ?_footerStatusHtml(statusText)
+    :(statusText?`<span class="lf-status">${esc(statusText)}</span>`:'');
   if(statusHtml) parts.push(statusHtml);
   if(!parts.length) return '';
   return `<div class="transparent-turn-footer">${parts.join('<span class="lf-sep">·</span>')}</div>`;

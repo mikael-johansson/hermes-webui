@@ -78,7 +78,7 @@ def note_progress(
                     "parent_stream_id": parent_stream_id,
                     "started_at": now,
                     "done": False,
-                    "last_nudge_at": 0.0,
+                    "last_nudge_at": float("-inf"),
                 }
                 _CHILDREN[child_sid] = rec
                 while len(_CHILDREN) > _MAX_CHILDREN:

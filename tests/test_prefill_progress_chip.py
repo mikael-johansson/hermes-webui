@@ -251,8 +251,9 @@ def test_call_stats_listener_and_render_wiring():
     assert "innerHTML" not in UI_JS[g:UI_JS.index("\n}", g)]
 
 
-@node
-def test_working_settle_check_flips_footer_once_server_reports_done():
+def _settle_run(replies, session, active_stream=None):
+    """Drive _scheduleWorkingSettleCheck with an immediate timer queue and a
+    scripted /api/session/working (an Error reply throws)."""
     src = """
 const src = %s;
 function extractFunc(name) {
@@ -261,40 +262,56 @@ function extractFunc(name) {
   while (depth > 0 && i < src.length) { if (src[i] === '{') depth++; else if (src[i] === '}') depth--; i++; }
   return src.slice(start, i);
 }
-const delays = [];
+const delays = []; const queue = [];
 global.setTimeout = (fn, ms) => { delays.push(ms); queue.push(fn); return queue.length; };
 global.clearTimeout = () => {};
-const queue = [];
-const replies = [{working: true}, {working: true}, {working: false}];
-let calls = 0;
-global.api = async (url) => { calls++; return replies.shift(); };
-global.t = (k) => k === 'done' ? 'Done' : k;
-const status = {textContent: 'Working…'};
-const label = {closest: () => status};
-global.document = {querySelectorAll: () => [label]};
-global.S = {session: {session_id: 'a', working: true}, activeStreamId: null};
+const replies = %s; const urls = []; let reloads = 0; let settled = 0;
+global.api = async (url) => { urls.push(url); const r = replies.shift(); if (r === 'ERR') throw new Error('x'); return r; };
+global.loadSession = () => { reloads++; };
+global.refreshLastTurnFooterStatus = () => { settled++; };
+global.S = {session: %s, activeStreamId: %s};
 const _WORKING_SETTLE_DELAYS_MS=[500,1000,2000,3000,5000,8000,13000,20000,30000];
+const _WORKING_SETTLE_MAX_ERRORS=3;
 const _workingSettleTimers={};
 eval(extractFunc('_scheduleWorkingSettleCheck'));
 eval(extractFunc('_settleWorkingFooters'));
 (async () => {
   _scheduleWorkingSettleCheck('a');
   while (queue.length) { await queue.shift()(); }
-  // A newer run owns the flag: no request at all.
-  S.session.working = true; S.activeStreamId = 'new';
-  const before = calls;
-  _scheduleWorkingSettleCheck('a');
-  while (queue.length) { await queue.shift()(); }
-  console.log(JSON.stringify({delays, calls, before, after: calls, working: S.session.working, text: status.textContent}));
+  console.log(JSON.stringify({delays, calls: urls.length, url: urls[0] || '', working: S.session.working, settled, reloads}));
 })();
-""" % json.dumps(UI_JS)
+""" % (json.dumps(UI_JS), json.dumps(replies), json.dumps(session), json.dumps(active_stream))
     res = subprocess.run([NODE], input=src, capture_output=True, text=True, timeout=30)
     assert res.returncode == 0, res.stderr
-    out = json.loads(res.stdout)
-    assert out["delays"][:3] == [500, 1000, 2000]
-    assert out["calls"] == 3 and out["before"] == out["after"]
-    assert out["working"] is True  # untouched while the newer run owns it
-    assert out["text"] == "Done"
+    return json.loads(res.stdout)
+
+
+@node
+def test_working_settle_check_flips_footer_once_server_reports_done():
+    out = _settle_run([{"working": True}, {"working": True}, {"working": False}],
+                      {"session_id": "a", "working": True})
+    assert out["delays"] == [500, 1000, 2000]
+    assert out["url"] == "/api/session/working?session_id=a"
+    assert out["calls"] == 3 and out["working"] is False and out["settled"] == 1
+    assert out["reloads"] == 0  # a WebUI-owned session needs no reload
+
+
+@node
+def test_working_settle_check_keeps_going_while_working_and_caps_delay():
+    """A delegated child can run for many minutes: keep checking (capped at
+    30 s) for as long as the server says working."""
+    out = _settle_run([{"working": True}] * 14 + [{"working": False}],
+                      {"session_id": "a", "working": True, "read_only": True})
+    assert out["calls"] == 15 and out["delays"][-6:] == [30000] * 6
+    assert out["working"] is False and out["reloads"] == 1  # read-only child: final reload
+
+
+@node
+def test_working_settle_check_gives_up_after_consecutive_errors_and_yields_to_new_run():
+    out = _settle_run(["ERR", "ERR", "ERR", {"working": False}], {"session_id": "a", "working": True})
+    assert out["calls"] == 3 and out["working"] is True and out["settled"] == 0
+    out = _settle_run([{"working": False}], {"session_id": "a", "working": True}, active_stream="new")
+    assert out["calls"] == 0 and out["working"] is True  # a newer run owns the flag
 
 
 def test_done_handler_schedules_working_settle():
