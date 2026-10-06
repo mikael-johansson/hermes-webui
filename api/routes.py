@@ -2509,6 +2509,15 @@ def _build_session_list_cache_payload(
         )
         deduped_cli = []
     diag_stage("sort_sessions")
+    # Delegated subagent children are agent-owned rows with no ACTIVE_RUNS row
+    # of their own; flag the running ones so their liveness dot shows.
+    try:
+        from api import subagent_runs as _subagent_runs
+        for _row in deduped_cli:
+            if not _row.get("is_streaming") and _subagent_runs.is_running(_row.get("session_id")):
+                _row["is_streaming"] = True
+    except Exception:
+        pass
     merged = webui_sessions + deduped_cli
     merged.sort(
         key=lambda s: s.get("last_message_at") or s.get("updated_at", 0) or 0,
@@ -14016,6 +14025,13 @@ def _handle_session_get(handler, parsed) -> bool:
             )
         except Exception:
             raw["working"] = False
+        # Delegated subagents still running for this (parent) session, so a
+        # reloaded view can say "2 subagents working" (api/subagent_runs.py).
+        try:
+            from api import subagent_runs as _subagent_runs
+            raw["subagents_running"] = _subagent_runs.running_children(getattr(s, "session_id", None))
+        except Exception:
+            raw["subagents_running"] = []
         if original_stream_id:
             try:
                 journal = find_run_summary(original_stream_id)
@@ -14239,6 +14255,16 @@ def _handle_session_get(handler, parsed) -> bool:
         }
         attach_todo_state(sess, msgs)
         sess = _merge_cli_sidebar_metadata(sess, cli_meta)
+        # Agent-owned sessions (e.g. a delegated subagent child) have no
+        # ACTIVE_RUNS row; report the same liveness the sidebar uses, and the
+        # per-call PP/TG the poller recorded for a child (read path only).
+        try:
+            from api.models import _is_session_working
+            from api.prefill_progress import attach_child_call_stats
+            sess["working"] = bool(_is_session_working(sid))
+            attach_child_call_stats(sid, sess.get("messages"))
+        except Exception:
+            sess["working"] = False
         return j(handler, {"session": public_session_projection(sess)})
 
 
@@ -14860,6 +14886,19 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/session/recovery/audit":
         from api.session_recovery import audit_session_recovery
         return j(handler, audit_session_recovery(SESSION_DIR, state_db_path=_active_state_db_path()))
+
+    if parsed.path == "/api/session/working":
+        # Liveness only, for any session id (WebUI-owned or agent-owned such as
+        # a delegated subagent). No existence check: unknown is not working.
+        sid = parse_qs(parsed.query).get("session_id", [""])[0]
+        if not sid:
+            return bad(handler, "Missing session_id")
+        try:
+            from api.models import _is_session_working
+            working = bool(_is_session_working(sid))
+        except Exception:
+            working = False
+        return j(handler, {"session_id": sid, "working": working})
 
     if parsed.path == "/api/session/status":
         sid = parse_qs(parsed.query).get("session_id", [""])[0]

@@ -234,7 +234,8 @@ class _CallLogHandler(logging.Handler):
             m_sid = _SESSION_TAG_RE.search(str(getattr(record, "session_tag", "") or ""))
             if not (m_call and m_id and m_sid):
                 return
-            note_model_call(m_sid.group(1), m_id.group(1), int(m_call.group(1)))
+            note_model_call(m_sid.group(1), m_id.group(1), int(m_call.group(1)),
+                            logged_at=getattr(record, "created", None))
         except Exception:
             pass
 
@@ -248,7 +249,14 @@ def _install_call_capture() -> None:
     logging.getLogger(_CALL_LOGGER).addHandler(_CallLogHandler(level=logging.INFO))
 
 
-def note_model_call(session_id: str, response_id: str, api_call_number: int, *, now: Optional[float] = None) -> bool:
+def note_model_call(
+    session_id: str,
+    response_id: str,
+    api_call_number: int,
+    *,
+    now: Optional[float] = None,
+    logged_at: Optional[float] = None,
+) -> bool:
     """Queue one completed model call on every registered run of
     ``session_id`` (normally exactly one). Returns whether any run took it."""
     if not session_id or not response_id:
@@ -267,6 +275,9 @@ def note_model_call(session_id: str, response_id: str, api_call_number: int, *, 
                 "api_call_number": api_call_number,
                 "request_id": response_id,
                 "captured_at": now,
+                # Wall time of the agent's log record: matches the call to its
+                # assistant message by timestamp for child sessions.
+                "logged_at": logged_at if isinstance(logged_at, (int, float)) else time.time(),
                 "stats": None,
                 "done": False,
             })
@@ -343,6 +354,7 @@ def _poll_loop() -> None:
             interval, fast_interval = _poll_seconds, _fast_poll_seconds
         fast = False
         try:
+            _close_dead_children(runs)
             fast = _poll_once(runs, interval)
         except Exception:
             logger.debug("prefill_progress: poll iteration failed", exc_info=True)
@@ -479,12 +491,18 @@ def _poll_once(runs: dict, interval: float) -> bool:
                         continue
                     c["stats"] = {k: entry.get(k) for k in _CALL_STAT_KEYS}
                     c["done"] = True
-                    call_frames.append((stream_id, run["session_id"], {
+                    if live_run.get("child"):
+                        _remember_child_call_locked(run["session_id"], c)
+                    call_frames.append((stream_id, run["session_id"], bool(live_run.get("child")), {
                         "call": c["call"],
                         "request_id": c["request_id"],
                         "stats": dict(c["stats"]),
                     }))
             _CALLS_CV.notify_all()
+            for stream_id, _run in members:
+                live_run = _RUNS.get(stream_id)
+                if live_run is not None and live_run.get("closing") and not _pending_calls_locked(live_run, now_mono):
+                    _drop_locked(stream_id)  # finished child, its stats are in
             for stream_id, run in members:
                 sstate = _STREAM_STATE.get(stream_id)
                 if sstate is None or stream_id not in _RUNS:
@@ -503,21 +521,34 @@ def _poll_once(runs: dict, interval: float) -> bool:
                     sstate["stale_sent"] = True
                     frame = dict(state["last"], stale=True)
                 if frame is not None:
-                    frames.append((stream_id, run["session_id"], frame))
-        for stream_id, session_id, frame in frames:
-            _deliver(stream_id, session_id, dict(frame, stream_id=stream_id, session_id=session_id))
-        for stream_id, session_id, frame in call_frames:
+                    frames.append((stream_id, run["session_id"], bool(run.get("child")), frame))
+        for stream_id, session_id, child, frame in frames:
+            _deliver(stream_id, session_id, dict(frame, stream_id=stream_id, session_id=session_id), child=child)
+        for stream_id, session_id, child, frame in call_frames:
             _deliver(stream_id, session_id, dict(frame, stream_id=stream_id, session_id=session_id),
-                     event=CALL_STATS_EVENT)
+                     event=CALL_STATS_EVENT, child=child)
     return fast
 
 
-def _deliver(stream_id: str, session_id: str, payload: dict, event: str = EVENT_NAME) -> bool:
+def _deliver(stream_id: str, session_id: str, payload: dict, event: str = EVENT_NAME, *, child: bool = False) -> bool:
     """Push one ephemeral frame to a live stream's connected tabs.
 
     Snapshots ACTIVE_RUNS and STREAMS under their own locks (never nested,
-    never with ``_LOCK``), then puts outside every lock.
+    never with ``_LOCK``), then puts outside every lock. A delegated child has
+    no stream of its own: its frames go to its per-session channel, which
+    only delivers to connected tabs (never buffers).
     """
+    if child:
+        from api.background_process import get_session_channel
+
+        ch = get_session_channel(session_id)
+        if ch is None:
+            return False
+        try:
+            return ch.emit(event, payload) > 0
+        except Exception:
+            logger.debug("prefill_progress: child emit failed for %s", session_id, exc_info=True)
+            return False
     from api import config as _cfg
 
     with _cfg.ACTIVE_RUNS_LOCK:
@@ -542,6 +573,7 @@ def _reset_for_tests() -> None:
     global _thread
     with _LOCK:
         _RUNS.clear()
+        _CHILD_CALLS.clear()
         _ORIGINS.clear()
         _STREAM_STATE.clear()
         thread = _thread
@@ -583,3 +615,124 @@ def stamp_call_stats(messages: Any, calls: list) -> int:
             msg["_callStats"] = dict(call["stats"], request_id=call.get("request_id"))
             stamped += 1
     return stamped
+
+
+
+# ── Delegated subagents (api/subagent_runs.py) ──────────────────────────────
+
+CHILD_PREFIX = "child:"
+# A child whose liveness can't be confirmed this long after registering is
+# closed by the poller (covers a missed subagent.complete).
+CHILD_LIVENESS_GRACE_S = 15.0
+_CHILD_CALLS_MAX_SESSIONS = 200
+_CHILD_CALLS_MAX_PER_SESSION = 500
+# child session id -> [{request_id, logged_at, stats}] (insertion-ordered,
+# bounded). In memory only: a WebUI restart forgets them.
+_CHILD_CALLS: dict = {}
+
+
+def register_child(child_session_id: str, parent_stream_id: str) -> bool:
+    """Observe a delegated child with its parent run's server and key.
+
+    Only when the parent run is registered (its provider is allowlisted);
+    a child on another provider then simply never matches a server entry.
+    Its model calls are captured by session id like any run's."""
+    if not child_session_id or not parent_stream_id:
+        return False
+    with _LOCK:
+        parent = _RUNS.get(parent_stream_id)
+        if not parent:
+            return False
+        origin, api_key = parent["origin"], parent["api_key"]
+    enabled, _poll, _fast = _settings()
+    if origin not in enabled:
+        return False
+    key = CHILD_PREFIX + child_session_id
+    if not register(key, child_session_id, origin, api_key):
+        return False
+    with _LOCK:
+        run = _RUNS.get(key)
+        if run is not None:
+            run["child"] = True
+            run.setdefault("registered_at", time.monotonic())
+    return True
+
+
+def close_child(child_session_id: str) -> None:
+    """The child finished: keep polling only until its pending call stats
+    resolve (or time out), then the poller drops it."""
+    with _LOCK:
+        run = _RUNS.get(CHILD_PREFIX + str(child_session_id or ""))
+        if run is not None:
+            run["closing"] = True
+            _wake.set()
+
+
+def _close_dead_children(runs: dict) -> None:
+    """Close child runs whose subagent is no longer running (a missed
+    subagent.complete), after a grace period, and tell the parent. Outside
+    ``_LOCK``."""
+    from api import subagent_runs
+
+    now = time.monotonic()
+    for run in runs.values():
+        if not run.get("child") or run.get("closing"):
+            continue
+        if now - run.get("registered_at", now) < CHILD_LIVENESS_GRACE_S:
+            continue
+        if not subagent_runs.is_running(run["session_id"]):
+            close_child(run["session_id"])
+            parent = subagent_runs.child_parent(run["session_id"]) or {}
+            if parent.get("parent_session_id"):
+                subagent_runs.notify_parent(parent["parent_session_id"], parent.get("parent_stream_id"))
+
+
+def _remember_child_call_locked(child_session_id: str, call: dict) -> None:
+    calls = _CHILD_CALLS.pop(child_session_id, None) or []
+    _CHILD_CALLS[child_session_id] = calls  # most recently used last
+    if any(c["request_id"] == call["request_id"] for c in calls):
+        return
+    calls.append({"request_id": call["request_id"], "logged_at": call.get("logged_at"),
+                  "stats": dict(call["stats"])})
+    del calls[:-_CHILD_CALLS_MAX_PER_SESSION]
+    while len(_CHILD_CALLS) > _CHILD_CALLS_MAX_SESSIONS:
+        _CHILD_CALLS.pop(next(iter(_CHILD_CALLS)))
+
+
+def attach_child_call_stats(session_id: str, messages: Any, *, max_skew_s: float = 10.0) -> int:
+    """Attach ``_callStats`` to a child session's assistant messages (read
+    path only; hermes-agent owns the child's stored messages).
+
+    Child messages carry no response id, so each call is matched to the
+    unassigned assistant message whose ``timestamp`` is nearest the call's
+    log time, within ``max_skew_s``; no match, no stats. Returns the count."""
+    if not isinstance(messages, list):
+        return 0
+    with _LOCK:
+        calls = [dict(c) for c in _CHILD_CALLS.get(str(session_id or ""), ())]
+    if not calls:
+        return 0
+    candidates = []
+    for i, m in enumerate(messages):
+        if isinstance(m, dict) and m.get("role") == "assistant" and "_callStats" not in m:
+            ts = m.get("timestamp")
+            if isinstance(ts, (int, float)) and not isinstance(ts, bool):
+                candidates.append((i, float(ts)))
+    used: set = set()
+    attached = 0
+    for c in calls:
+        logged = c.get("logged_at")
+        if not isinstance(logged, (int, float)):
+            continue
+        best = None
+        for i, ts in candidates:
+            if i in used:
+                continue
+            skew = abs(ts - logged)
+            if skew <= max_skew_s and (best is None or skew < best[1]):
+                best = (i, skew)
+        if best is not None:
+            used.add(best[0])
+            messages[best[0]]["_callStats"] = dict(c["stats"], request_id=c["request_id"])
+            attached += 1
+    return attached
