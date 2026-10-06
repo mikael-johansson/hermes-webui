@@ -4737,6 +4737,38 @@ def _get_title_refresh_interval() -> int:
         return 0
 
 
+def _build_title_refresh_digest(messages, current_title: str, *, max_chars: int = 1200) -> str:
+    """Build a bounded "bigger picture" digest for an adaptive title refresh.
+
+    Combines the opening exchange, the current title, and the latest
+    exchange, hard-capped at ``max_chars`` (~1200) total. The aux/agent
+    title routes are fresh short completions with NO conversation history,
+    so this pre-built, truncated digest is the only context the title
+    model sees — the full message array is never serialized into the call.
+    """
+    first_u, first_a = _first_exchange_snippets(messages, scan_past_consecutive_users=True)
+    last_u, last_a = _latest_exchange_snippets(messages)
+    parts = []
+    title = str(current_title or '').strip()
+    if title:
+        parts.append(f"Current title: {title[:120]}")
+    if first_u or first_a:
+        opening = "Opening exchange:"
+        if first_u:
+            opening += f"\nUser: {first_u[:400]}"
+        if first_a:
+            opening += f"\nAssistant: {first_a[:400]}"
+        parts.append(opening)
+    if last_u or last_a:
+        latest = "Latest exchange:"
+        if last_u:
+            latest += f"\nUser: {last_u[:500]}"
+        if last_a:
+            latest += f"\nAssistant: {last_a[:500]}"
+        parts.append(latest)
+    return ("\n\n".join(parts))[:max_chars]
+
+
 def _is_provisional_title(current_title: str, messages) -> bool:
     """Heuristic: title equals first-message substring placeholder."""
     first_user_text = ''
@@ -5583,7 +5615,45 @@ def _generated_title_language_mismatch(user_text: str, title: str, pinned_langua
     return _title_language_mismatch(user_text, title)
 
 
-def _title_prompts(user_text: str, assistant_text: str, pinned_language: Optional[str] = None) -> tuple[str, list[str]]:
+def _title_prompts(
+    user_text: str,
+    assistant_text: str,
+    pinned_language: Optional[str] = None,
+    *,
+    kind: str = 'first',
+    current_title: str = '',
+    context_digest: str = '',
+) -> tuple[str, list[str]]:
+    if kind == 'refresh':
+        # Refresh prompt variant: the session already has an established topic.
+        # The user message (``context_digest``) carries the bounded opening +
+        # current-title + latest exchange, and the instruction tells the model
+        # to keep the session-level "bigger picture" and only retitle if the
+        # subject genuinely shifted. Language/emoji rules are identical to the
+        # first-generation path so a refresh stays within the same constraints.
+        qa = context_digest or f"User question:\n{user_text[:500]}\n\nAssistant answer:\n{assistant_text[:500]}"
+        language_rule = _title_prompt_language_rule(user_text, pinned_language)
+        emoji_rule = _title_prompt_emoji_rule()
+        title_ref = str(current_title or '').strip() or '(untitled)'
+        prompts = [
+            (
+                f"This session is currently titled '{title_ref}'.\n"
+                "Review the conversation context below and refresh that title.\n"
+                "Keep the established topic and the session-level 'bigger picture'.\n"
+                "Only change the title if the conversation has genuinely shifted to a new subject.\n"
+                "If the topic is unchanged, return the same title (you may lightly refine it).\n"
+                f"{language_rule}"
+                f"{emoji_rule}"
+                "Return only the title text, 3-8 words, as a topic label.\n"
+                "Do not use markdown, bullets, labels, or prefixes like Session Title:.\n"
+                "Do not output a full sentence.\n"
+                "Do not output acknowledgements or completion phrases like OK, done, or all set.\n"
+                "Do not describe internal reasoning.\n"
+                "Good (keep the topic): Python Import Error Fix\n"
+                "Good (topic shifted): Kubernetes Cluster Migration"
+            ),
+        ]
+        return qa, prompts
     qa = f"User question:\n{user_text[:500]}\n\nAssistant answer:\n{assistant_text[:500]}"
     language_rule = _title_prompt_language_rule(user_text, pinned_language)
     emoji_rule = _title_prompt_emoji_rule()
@@ -5847,11 +5917,21 @@ def generate_title_raw_via_aux(
     base_url: str = '',
     *,
     pinned_language: Optional[str] = None,
+    refresh_context: Optional[dict] = None,
 ) -> tuple[Optional[str], str]:
     """Return (raw_text, status) via auxiliary LLM route."""
-    if not user_text or not assistant_text:
+    refresh_ctx = refresh_context or {}
+    has_digest = bool(refresh_ctx.get('context_digest'))
+    if not (user_text and assistant_text) and not has_digest:
         return None, 'missing_exchange'
-    qa, prompts = _title_prompts(user_text, assistant_text, pinned_language)
+    qa, prompts = _title_prompts(
+        user_text,
+        assistant_text,
+        pinned_language,
+        kind=refresh_ctx.get('kind', 'first'),
+        current_title=refresh_ctx.get('current_title', ''),
+        context_digest=refresh_ctx.get('context_digest', ''),
+    )
     configured = _get_aux_title_config()
     caller_supplied_route = bool(provider or model or base_url)
     provider = provider or configured.get('provider', '') or ''
@@ -5930,14 +6010,21 @@ def generate_title_raw_via_aux(
         return None, 'llm_error_aux'
 
 
-def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, pinned_language: Optional[str] = None) -> tuple[Optional[str], str]:
+def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, pinned_language: Optional[str] = None, refresh_context: Optional[dict] = None) -> tuple[Optional[str], str]:
     """Return (raw_text, status) via active-agent route."""
     if not user_text or not assistant_text:
         return None, 'missing_exchange'
     if agent is None:
         return None, 'missing_agent'
 
-    qa, prompts = _title_prompts(user_text, assistant_text, pinned_language)
+    qa, prompts = _title_prompts(
+        user_text,
+        assistant_text,
+        pinned_language,
+        kind=(refresh_context or {}).get('kind', 'first'),
+        current_title=(refresh_context or {}).get('current_title', ''),
+        context_digest=(refresh_context or {}).get('context_digest', ''),
+    )
     base_max_tokens = _title_completion_budget(
         getattr(agent, 'provider', ''),
         getattr(agent, 'model', ''),
@@ -6054,13 +6141,13 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, 
         agent.reasoning_config = prev_reasoning
 
 
-def _generate_llm_session_title_for_agent(agent, user_text: str, assistant_text: str) -> tuple[Optional[str], str, str]:
+def _generate_llm_session_title_for_agent(agent, user_text: str, assistant_text: str, refresh_context: Optional[dict] = None) -> tuple[Optional[str], str, str]:
     """Generate a title via active-agent route, then sanitize/validate result."""
     # One snapshot drives both the prompt and validation: when a resolvable
     # language is pinned, the prompt asks for it and validation checks the
     # title against the pinned script instead of the conversation start.
     pinned_language = _configured_title_language()
-    raw, status = generate_title_raw_via_agent(agent, user_text, assistant_text, pinned_language=pinned_language)
+    raw, status = generate_title_raw_via_agent(agent, user_text, assistant_text, pinned_language=pinned_language, refresh_context=refresh_context)
     if not raw:
         return None, status, ''
     title = _sanitize_generated_title(raw)
@@ -6071,7 +6158,7 @@ def _generate_llm_session_title_for_agent(agent, user_text: str, assistant_text:
     return None, 'llm_invalid', str(raw)[:120]
 
 
-def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, agent=None, *, use_agent_model: bool = False, conversation_id: str = '') -> tuple[Optional[str], str, str]:
+def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, agent=None, *, use_agent_model: bool = False, conversation_id: str = '', refresh_context: Optional[dict] = None) -> tuple[Optional[str], str, str]:
     """Generate a title via dedicated auxiliary LLM route, then sanitize/validate result.
 
     When use_agent_model is False (default), the auxiliary client resolves
@@ -6115,6 +6202,7 @@ def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, age
             model=model,
             base_url=base_url,
             pinned_language=pinned_language,
+            refresh_context=refresh_context,
         )
     finally:
         if ctx_token is not None:
@@ -6337,14 +6425,26 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
         put_event('stream_end', {'session_id': session_id})
 
 
-def _run_background_title_refresh(session_id: str, user_text: str, assistant_text: str, current_title: str, put_event, agent=None):
+def _run_background_title_refresh(session_id: str, user_text: str, assistant_text: str, current_title: str, put_event, agent=None, *, context_digest: str = ''):
     """Refresh an existing LLM-generated title using the latest exchange text.
 
     Unlike _run_background_title_update, this does NOT guard on
     llm_title_generated — it assumes the title was already LLM-generated
     and the session has progressed enough to warrant a refresh.
     It does NOT emit stream_end (the caller already did).
+
+    ``context_digest`` is an optional pre-built, bounded "bigger picture"
+    digest (opening exchange + current title + latest exchange) that is
+    threaded into the refresh prompt so the model keeps the established
+    topic instead of being hijacked by the most recent exchange. The digest
+    is built by the caller (``_maybe_schedule_title_refresh``) and hard-capped
+    there, so the full message array is never serialized into the title call.
     """
+    refresh_context = {
+        'kind': 'refresh',
+        'current_title': current_title,
+        'context_digest': context_digest,
+    }
     try:
         try:
             s = get_session(session_id)
@@ -6368,13 +6468,13 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
                 return
             aux_title_configured = _aux_title_configured()
             if agent and not aux_title_configured:
-                next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
+                next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text, refresh_context)
                 if not next_title and llm_status in ('llm_error', 'llm_invalid'):
-                    next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True, conversation_id=session_id)
+                    next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True, conversation_id=session_id, refresh_context=refresh_context)
             else:
-                next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, conversation_id=session_id)
+                next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, conversation_id=session_id, refresh_context=refresh_context)
                 if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
-                    next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
+                    next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text, refresh_context)
         if not next_title:
             _put_title_status(put_event, session_id, 'refresh_skipped', llm_status or 'empty', effective, raw_preview)
             return
@@ -6424,8 +6524,18 @@ def generate_session_title_for_session(session, *, prefer_latest: bool = False, 
     replacing the current title is allowed, then persist the returned title.
     """
     messages = getattr(session, 'messages', None) or []
+    current_title = str(getattr(session, 'title', '') or '').strip()
+    refresh_context = None
     if prefer_latest:
         user_text, assistant_text = _latest_exchange_snippets(messages)
+        # Nudge the manual "Regenerate title" toward the established topic the
+        # same way the adaptive refresh does: build a bounded bigger-picture
+        # digest and pass it (with the current title) into the refresh prompt.
+        refresh_context = {
+            'kind': 'refresh',
+            'current_title': current_title,
+            'context_digest': _build_title_refresh_digest(messages, current_title),
+        }
     else:
         # Manual "Regenerate title" (#7543): scan past consecutive opening user
         # rows to the first complete user+assistant pair, so a transcript that
@@ -6440,7 +6550,7 @@ def generate_session_title_for_session(session, *, prefer_latest: bool = False, 
     with profiles_api.profile_env_for_background_worker(session, "manual title regeneration", logger_override=logger):
         if not _aux_title_generation_enabled():
             return None, 'title_generation_disabled', ''
-        next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, conversation_id=getattr(session, 'session_id', '') or '')
+        next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, conversation_id=getattr(session, 'session_id', '') or '', refresh_context=refresh_context)
     if next_title:
         return next_title, llm_status, raw_preview
     fallback_title = _fallback_title_from_exchange(user_text, assistant_text)
@@ -6566,9 +6676,11 @@ def _maybe_schedule_title_refresh(session, put_event, agent):
     last_u, last_a = _latest_exchange_snippets(session.messages)
     if not last_u and not last_a:
         return
+    context_digest = _build_title_refresh_digest(session.messages, current_title)
     threading.Thread(
         target=_run_background_title_refresh,
         args=(session.session_id, last_u, last_a, current_title, put_event, agent),
+        kwargs={'context_digest': context_digest},
         daemon=True,
     ).start()
 
