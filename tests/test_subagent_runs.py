@@ -151,6 +151,14 @@ def test_notify_parent_reaches_stream_and_session_channel(monkeypatch):
     assert emitted[0][0] == "subagents_status" and emitted[0][1]["session_id"] == "P"
 
 
+def test_notify_parent_invalidates_sidebar_list(monkeypatch):
+    import api.session_events as se
+    seen = []
+    monkeypatch.setattr(se, "publish_session_list_changed", lambda **kw: seen.append(kw))
+    sr.notify_parent("P", None)
+    assert seen == [{"reason": "subagent_status", "session_id": "P"}]
+
+
 def test_nudge_throttled_and_only_with_subscribers(monkeypatch):
     monkeypatch.setattr(pp, "register_child", lambda c, p: True)
     monkeypatch.setattr(pp, "close_child", lambda c: None)

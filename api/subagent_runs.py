@@ -187,6 +187,15 @@ def notify_parent(parent_session_id: str, parent_stream_id: Optional[str] = None
             ch.emit(PARENT_STATUS_EVENT, payload)
     except Exception:
         logger.debug("subagent_runs: notify_parent failed", exc_info=True)
+    try:
+        # The /api/sessions payload is cached (45 s while a turn streams), so
+        # a child row's liveness dot would lag its start/finish: invalidate
+        # and tell open sidebars to refetch, like a WebUI run does.
+        from api.session_events import publish_session_list_changed
+
+        publish_session_list_changed(reason="subagent_status", session_id=parent_session_id)
+    except Exception:
+        logger.debug("subagent_runs: session list publish failed", exc_info=True)
 
 
 def child_parent(session_id: Any) -> Optional[dict]:
