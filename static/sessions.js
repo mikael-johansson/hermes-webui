@@ -2538,15 +2538,15 @@ async function loadSession(sid){
     return loadSession(continuationSid,{...opts,_continuationParentSid:sid,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
   S.session=data.session;
-  // Running delegated subagents (parent view) and stream-less liveness (a
-  // child, or the post-done unwind) settle on their own as the server moves on.
-  if(typeof setSubagentsRunning==='function') setSubagentsRunning(sid,S.session&&S.session.subagents_running);
-  if(S.session&&S.session.working&&typeof _scheduleWorkingSettleCheck==='function') _scheduleWorkingSettleCheck(sid);
   if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
   // Loading a real existing session abandons any pre-session toolset override
   // staged on the empty composer before any deferred refresh work runs.
   S._pendingSessionToolsets=null;
+  // Running delegated subagents (parent view) and stream-less liveness (a
+  // child, or the post-done unwind) settle on their own as the server moves on.
+  if(typeof setSubagentsRunning==='function') setSubagentsRunning(sid,S.session&&S.session.subagents_running);
+  if(S.session&&S.session.working&&typeof _scheduleWorkingSettleCheck==='function') _scheduleWorkingSettleCheck(sid);
   if(typeof populateModelDropdown==='function'){
     const modelRefreshSid=sid;
     const isActiveModelRefreshSession=()=>!!(S.session&&S.session.session_id===modelRefreshSid);
