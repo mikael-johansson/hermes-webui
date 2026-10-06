@@ -337,7 +337,17 @@ def test_wiring_in_worker_and_routes():
     assert 'sess["working"] = bool(_is_session_working(sid))' in routes
     assert "attach_child_call_stats(sid, sess.get(\"messages\"))" in routes
     assert 'raw["subagents_running"] = _subagent_runs.running_children(' in routes
-    assert '_row["is_streaming"] = True' in routes
+    cache = (REPO_ROOT / "api" / "route_session_list_cache.py").read_text()
+    assert "item[\"is_streaming\"] = subagent_runs.is_running(sid)" in cache
+
+
+def test_sidebar_overlay_marks_running_child_streaming(monkeypatch, calls):
+    from api import route_session_list_cache as rc
+    monkeypatch.setattr(sr, "_active_subagent_ids", lambda: {"sa1"})
+    sr.note_progress("subagent.start", _ev("s"), parent_session_id="P", parent_stream_id="S")
+    rows = rc._session_list_cache_overlay_runtime_rows([
+        {"session_id": "c1", "is_streaming": False}, {"session_id": "other", "is_streaming": False}])
+    assert [r["is_streaming"] for r in rows] == [True, False]
 
 
 # ── client ──────────────────────────────────────────────────────────────────

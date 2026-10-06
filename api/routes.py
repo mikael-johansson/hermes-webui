@@ -2509,15 +2509,6 @@ def _build_session_list_cache_payload(
         )
         deduped_cli = []
     diag_stage("sort_sessions")
-    # Delegated subagent children are agent-owned rows with no ACTIVE_RUNS row
-    # of their own; flag the running ones so their liveness dot shows.
-    try:
-        from api import subagent_runs as _subagent_runs
-        for _row in deduped_cli:
-            if not _row.get("is_streaming") and _subagent_runs.is_running(_row.get("session_id")):
-                _row["is_streaming"] = True
-    except Exception:
-        pass
     merged = webui_sessions + deduped_cli
     merged.sort(
         key=lambda s: s.get("last_message_at") or s.get("updated_at", 0) or 0,
