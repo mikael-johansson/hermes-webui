@@ -1543,6 +1543,7 @@ class Session:
                  gateway_routing=None, gateway_routing_history=None,
                  llm_title_generated: bool=False,
                  manual_title: bool=False,
+                 title_provenance=None,
                 parent_session_id: str=None,
                 worktree_path=None,
                 worktree_branch=None,
@@ -1654,6 +1655,13 @@ class Session:
         self.gateway_routing_history = gateway_routing_history if isinstance(gateway_routing_history, list) else []
         self.llm_title_generated = bool(llm_title_generated)
         self.manual_title = bool(manual_title)
+        # Creation-time provenance of the title (dict, e.g. {'kind': 'placeholder',
+        # 'source': 'first_user_message', ...}) so identity survives edits to
+        # the underlying text. Tolerates None and legacy/foreign values:
+        # anything non-dict normalizes to None.
+        self.title_provenance = (
+            title_provenance if isinstance(title_provenance, dict) else None
+        )
         self.parent_session_id = parent_session_id
         self.worktree_path = str(Path(worktree_path).expanduser().resolve()) if worktree_path else None
         self.worktree_branch = str(worktree_branch) if worktree_branch else None
@@ -1751,6 +1759,7 @@ class Session:
             'transcript_generation',
             'transcript_generation_baseline',
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated', 'manual_title',
+            'title_provenance',
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
