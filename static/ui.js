@@ -15600,12 +15600,9 @@ function _placeLlmCallStatsRows(root){
     if(row&&end.parentElement) end.parentElement.insertBefore(row,end.nextElementSibling);
   }
 }
-// Live: a model call just finished. Its stats arrive ~1 s later, possibly
-// after the next call's thinking started, so place it after the newest tool
-// row (a tool-calling call always ends with its tool rows) unless a line
-// already follows that row (then this call had no tools: before the status
-// line). Deduped by request id; the settled render redraws from
-// msg._callStats on done/reload.
+// Live: a model call just finished; show its line after the call's tool row
+// (see the claiming rules inside). Deduped by request id; the settled render
+// redraws every line from msg._callStats on done/reload.
 function appendLiveLlmCallStats(d){
   if(!d||!d.stats||typeof isTransparentStream!=='function'||!isTransparentStream()) return;
   const turn=$('liveAssistantTurn');
@@ -15615,28 +15612,48 @@ function appendLiveLlmCallStats(d){
   const row=_llmCallStatsRow(d.stats,d.request_id);
   if(!row) return;
   row.setAttribute('data-live-stream-owned','1');
-  const tools=blocks.querySelectorAll('.tool-card-row');
-  const lastTool=tools.length?tools[tools.length-1]:null;
-  let after=lastTool;
-  for(let n=lastTool&&lastTool.nextElementSibling;n;n=n.nextElementSibling){
-    if(n.classList&&n.classList.contains('llm-call-stats')){ after=null; break; }
-  }
-  // Remember the owning tool row by its tool-call key: the live anchor scene
-  // re-packs its rows on every update and would otherwise sweep this line
-  // (not a scene row) to the top. _relocateLiveCallStats puts it back.
-  const key=after&&after.getAttribute('data-tool-disclosure-key');
-  if(key) row.setAttribute('data-after-tool-key',key);
+  // Tie the line to its call's tool row by tool-call key: the live anchor
+  // scene re-packs its rows on every update and would otherwise sweep this
+  // line (not a scene row) away; _relocateLiveCallStats re-seats it.
+  // The stats usually arrive BEFORE their own call's tool row exists (the
+  // agent logs the call when the response lands; the tool starts after).
+  // So: if the newest tool row is unclaimed it is this call's; otherwise
+  // the line is pending and claims the first tool row that appears next.
+  // A call with no tools (the final answer) stays above the status line.
+  const keys=_liveToolKeys(blocks);
+  const newest=keys.length?keys[keys.length-1]:'';
+  if(newest&&!_liveToolKeyClaimed(blocks,newest)) row.setAttribute('data-after-tool-key',newest);
+  else row.setAttribute('data-pending-tool-count',String(keys.length));
   const status=$('liveRunStatus');
   if(status&&status.parentElement===blocks) blocks.insertBefore(row,status);
   else blocks.appendChild(row);
   _relocateLiveCallStats(blocks);
 }
-// Re-seat live per-call lines after their tool row (data-after-tool-key);
-// lines of calls without tools stay just above the run-status line.
-// Idempotent: only moves a line that is out of place.
+function _liveToolKeys(blocks){
+  return Array.from(blocks.querySelectorAll('.tool-card-row[data-tool-disclosure-key]'))
+    .map(r=>r.getAttribute('data-tool-disclosure-key')).filter(Boolean)
+    .filter((k,i,all)=>all.indexOf(k)===i);
+}
+function _liveToolKeyClaimed(blocks,key){
+  return Array.from(blocks.querySelectorAll('.llm-call-stats[data-after-tool-key]'))
+    .some(r=>r.getAttribute('data-after-tool-key')===key);
+}
+// Re-seat live per-call lines after their tool row (data-after-tool-key),
+// first letting pending lines claim the tool row that appeared after them.
+// Lines still without a tool stay together, in arrival order, just above the
+// run-status line. Idempotent: only moves a line that is out of place.
 function _relocateLiveCallStats(blocks){
   if(!blocks||!blocks.querySelectorAll) return;
   const status=$('liveRunStatus');
+  const keys=_liveToolKeys(blocks);
+  blocks.querySelectorAll('.llm-call-stats[data-live-stream-owned="1"][data-pending-tool-count]').forEach(row=>{
+    const idx=Number(row.getAttribute('data-pending-tool-count'));
+    const key=Number.isFinite(idx)?keys[idx]:'';
+    if(key&&!_liveToolKeyClaimed(blocks,key)){
+      row.setAttribute('data-after-tool-key',key);
+      row.removeAttribute('data-pending-tool-count');
+    }
+  });
   blocks.querySelectorAll('.llm-call-stats[data-live-stream-owned="1"]').forEach(row=>{
     const key=row.getAttribute('data-after-tool-key');
     let anchor=null;
@@ -15646,8 +15663,7 @@ function _relocateLiveCallStats(blocks){
     }
     if(anchor&&anchor.parentElement){
       if(anchor.nextElementSibling!==row) anchor.parentElement.insertBefore(row,anchor.nextElementSibling);
-    }else if(!key&&status&&status.parentElement===blocks&&row.parentElement===blocks){
-      // keep untethered lines together, in arrival order, right above the status line
+    }else if(status&&status.parentElement===blocks&&row.parentElement===blocks){
       let n=row.nextElementSibling;
       while(n&&n!==status&&n.classList&&n.classList.contains('llm-call-stats')) n=n.nextElementSibling;
       if(n!==status) blocks.insertBefore(row,status);

@@ -325,11 +325,16 @@ def test_live_call_stats_survive_anchor_scene_repack():
     remember their tool row and are re-seated after every re-pack."""
     f = UI_JS.index("function appendLiveLlmCallStats(")
     live = UI_JS[f:UI_JS.index("\n}", f)]
-    assert "row.setAttribute('data-after-tool-key',key)" in live
+    # Stats usually land BEFORE their own call's tool row: an unclaimed newest
+    # tool row is this call's, otherwise the line is pending and claims the
+    # first tool row that appears next.
+    assert "if(newest&&!_liveToolKeyClaimed(blocks,newest)) row.setAttribute('data-after-tool-key',newest);" in live
+    assert "else row.setAttribute('data-pending-tool-count',String(keys.length));" in live
     assert "_relocateLiveCallStats(blocks);" in live
     g = UI_JS.index("function _relocateLiveCallStats(")
     reloc = UI_JS[g:UI_JS.index("\n}", g)]
     assert "data-after-tool-key" in reloc and "data-tool-disclosure-key" in reloc
+    assert "data-pending-tool-count" in reloc and "row.removeAttribute('data-pending-tool-count')" in reloc
     assert "if(anchor.nextElementSibling!==row)" in reloc  # idempotent
     h = UI_JS.index("function _renderLiveAnchorActivitySceneTransparent(")
     scene = UI_JS[h:UI_JS.index("\nfunction ", h + 10)]
