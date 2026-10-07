@@ -453,3 +453,13 @@ def test_finish_time_wiring():
     f = UI_JS.index("function refreshLastTurnFooterStatus(")
     body = UI_JS[f:UI_JS.index("\n}", f)]
     assert body.count("getAttribute('data-finished-at')") == 2  # latest + older footers
+
+
+def test_parent_spinner_stays_on_title_line_with_child_list():
+    """A parent row with its child list open is taller than one line; its
+    state indicator stays on the title line (not between title and the first
+    child row), and the child-count badge keeps clear of it while visible."""
+    css = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    assert ".session-item:has(.session-child-sessions) > .session-attention-indicator{top:calc(8px + .8em);}" in css
+    assert ".session-item:has(> .session-attention-indicator:is(.is-streaming," in css
+    assert ".session-child-count{margin-right:22px;}" in css
