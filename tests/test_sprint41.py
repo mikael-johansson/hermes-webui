@@ -26,9 +26,12 @@ class TestTitleAutoGenerationCondition(unittest.TestCase):
 
     def _titles_that_trigger(self):
         """Extract the condition from the source so tests stay in sync with code."""
-        # Find the if-condition that calls title_from
+        # Find the if-condition that calls title_from. The condition reads
+        # `s.title in ('Untitled', 'New Chat', '') or not s.title:` (the
+        # title_provenance work widened it from the original
+        # `s.title == 'Untitled' or ...` form), so accept both spellings.
         m = re.search(
-            r'if\s+(s\.title\s*==.*?):\s*\n\s*s\.title\s*=\s*title_from',
+            r'if\s+((?:s\.title\s*(?:==\s*|in\s*).*)?or\s+not\s+s\.title\s*):\s*\n[\s\S]*?\n\s*s\.title\s*=.*title_from',
             STREAMING_PY,
             re.DOTALL,
         )
@@ -50,10 +53,20 @@ class TestTitleAutoGenerationCondition(unittest.TestCase):
     def test_condition_logic_covers_all_defaults(self):
         """The condition uses OR so any one default title triggers generation."""
         cond = self._titles_that_trigger()
-        # All three guards must be joined by 'or'
+        # The original spelling is `s.title == 'Untitled' or s.title == 'New Chat'
+        # or not s.title` (3 OR-joined sub-conditions). The title_provenance work
+        # widened it to `s.title in ('Untitled', 'New Chat', '') or not s.title`,
+        # which covers the same cases with an `in`-tuple (2 sub-conditions).
         parts = re.split(r'\bor\b', cond)
-        self.assertGreaterEqual(len(parts), 3,
-            "Expected at least 3 OR-joined sub-conditions (Untitled, New Chat, not s.title)")
+        if 'in (' in cond:
+            self.assertGreaterEqual(len(parts), 2,
+                "Expected at least 2 OR-joined sub-conditions "
+                "(in-tuple of default labels + not s.title)")
+            self.assertIn("'New Chat'", cond, "in-tuple must cover 'New Chat'")
+            self.assertIn("''", cond, "in-tuple must cover the empty title")
+        else:
+            self.assertGreaterEqual(len(parts), 3,
+                "Expected at least 3 OR-joined sub-conditions (Untitled, New Chat, not s.title)")
 
 
 

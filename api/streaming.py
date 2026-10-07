@@ -98,6 +98,7 @@ from api.models import (
 )
 from api.session_ops import (
     clear_title_provenance,
+    has_live_placeholder_provenance,
     mark_session_title_generated,
     session_has_manual_title,
     stamp_placeholder_title_provenance,
@@ -4804,6 +4805,23 @@ def _is_provisional_title(current_title: str, messages) -> bool:
     return any(candidate and current == candidate for candidate in candidates)
 
 
+def _live_placeholder_title_eligible(session) -> bool:
+    """Live-stamp title eligibility for a title_from()-derived placeholder.
+
+    _is_provisional_title re-derives the placeholder from the CURRENT first
+    message text, so it stops matching once the user edits that message —
+    which permanently blocks auto-regeneration (llm_title_generated=False
+    plus the heuristic failing). A session carrying a LIVE placeholder
+    provenance stamp (see session_ops.has_live_placeholder_provenance) keeps
+    its placeholder identity across such edits, so it stays eligible.
+    The llm_title_generated=True blocking rule is NOT overridden: a
+    genuinely generated title stays final unless manually regenerated.
+    """
+    if getattr(session, 'llm_title_generated', False):
+        return False
+    return has_live_placeholder_provenance(session)
+
+
 def _background_title_generation_inputs(session):
     """Return sanitized first-exchange inputs when background title generation is eligible."""
     messages = getattr(session, 'messages', None) or []
@@ -4815,6 +4833,7 @@ def _background_title_generation_inputs(session):
         or not title
         or _is_provisional_title(title, messages)
         or invalid_existing_title
+        or _live_placeholder_title_eligible(session)
     )
     if not eligible_title or (
         getattr(session, 'llm_title_generated', False) and not invalid_existing_title
@@ -6357,6 +6376,7 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
             or current in ('Untitled', 'New Chat', '')
             or _is_provisional_title(current, s.messages)
             or _invalid_existing
+            or _live_placeholder_title_eligible(s)
         )
         if not still_auto:
             _put_title_status(put_event, session_id, 'skipped', 'manual_title', current)
@@ -6406,6 +6426,7 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                         or effective_title in ('Untitled', 'New Chat', '')
                         or _is_provisional_title(effective_title, s.messages)
                         or invalid_existing_now
+                        or _live_placeholder_title_eligible(s)
                     )
                 if manual_title or not still_auto:
                     _put_title_status(put_event, session_id, 'skipped', 'manual_title', effective_title)

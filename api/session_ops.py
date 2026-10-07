@@ -676,6 +676,51 @@ def stamp_placeholder_title_provenance(session, messages) -> dict | None:
     return stamp
 
 
+def _live_placeholder_source_message(messages, stamp_uid):
+    """Return the session message whose stable identity still matches the stamp.
+
+    Re-verifies by message_uid first, then the stable id alias set
+    (id/message_id) via _stable_message_identity_details. Returns None when
+    the source message was deleted/replaced so the uid no longer resolves.
+    """
+    from api.models import _stable_message_identity_details
+
+    wanted = str(stamp_uid)
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        uid = m.get('message_uid')
+        if uid is not None and str(uid) == wanted:
+            return m
+        stable, valid = _stable_message_identity_details(m)
+        if valid and stable is not None and str(stable) == wanted:
+            return m
+    return None
+
+
+def has_live_placeholder_provenance(session) -> bool:
+    """True iff the session carries a LIVE placeholder title-provenance stamp.
+
+    Live means the recorded source message still resolves in the session's
+    current message list (re-verified by message_uid, falling back to the
+    stable id alias set). When the source message was deleted/replaced so
+    the uid no longer resolves, this returns False and callers degrade to
+    the legacy text heuristics. Pure and dependency-light: read-only over
+    the session, no side effects.
+    """
+    stamp = getattr(session, 'title_provenance', None)
+    if not isinstance(stamp, dict) or stamp.get('kind') != 'placeholder':
+        return False
+    if getattr(session, 'llm_title_generated', False):
+        # A real (non-placeholder) title superseded the provenance; the
+        # clear step should have removed the stamp, but fail closed here.
+        return False
+    stamp_uid = stamp.get('source_message_uid')
+    if not isinstance(stamp_uid, str) or not stamp_uid:
+        return False
+    return _live_placeholder_source_message(getattr(session, 'messages', None), stamp_uid) is not None
+
+
 def _truncate_at_last_user(messages):
     history = messages or []
     last_user_idx = None
