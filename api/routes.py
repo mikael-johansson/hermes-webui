@@ -153,10 +153,13 @@ def _persist_generated_session_title(
             if not _looks_like_default_cli_title(latest_meta):
                 return session.title
         session.title = normalized_title
-        from api.session_ops import mark_session_title_generated
+        from api.session_ops import clear_title_provenance, mark_session_title_generated
 
         # mark_session_title_generated sets s.llm_title_generated = True and clears manual_title.
         mark_session_title_generated(session)
+        # A generated title is a real title write: drop any placeholder
+        # provenance the provisional title carried.
+        clear_title_provenance(session)
         session.save(touch_updated_at=False)
         with LOCK:
             SESSIONS[sid] = session
@@ -172,6 +175,7 @@ def _persist_generated_session_title(
         original_session.title = session.title
         original_session.llm_title_generated = session.llm_title_generated
         original_session.manual_title = session.manual_title
+        original_session.title_provenance = session.title_provenance
     return session.title
 
 

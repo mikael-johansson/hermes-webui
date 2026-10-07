@@ -96,7 +96,12 @@ from api.models import (
     record_process_wakeup_provider_unavailable_pause,
     reconciled_state_db_messages_for_session,
 )
-from api.session_ops import mark_session_title_generated, session_has_manual_title
+from api.session_ops import (
+    clear_title_provenance,
+    mark_session_title_generated,
+    session_has_manual_title,
+    stamp_placeholder_title_provenance,
+)
 from api.process_event_utils import (
     build_active_turn_token,
     claim_async_delegation_delivery,
@@ -6408,6 +6413,7 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                 if next_title != effective_title:
                     s.title = next_title
                     mark_session_title_generated(s)
+                    clear_title_provenance(s)
                     # Keep chronological ordering stable in the sidebar.
                     s.save(touch_updated_at=False)
                     effective_title = s.title
@@ -6501,6 +6507,7 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
                     return
                 s.title = next_title
                 mark_session_title_generated(s)
+                clear_title_provenance(s)
                 effective_title = s.title
             # Session.save() calls _write_session_index(), which acquires LOCK.
             # Keep the per-session agent lock for mutation serialization, but
@@ -13948,7 +13955,12 @@ def _run_agent_streaming(
                 # preserving transcript order across compacted/reconciled batches.
                 _stamp_missing_message_timestamps(s.messages)
                 # Only auto-generate title when still default; preserves user renames
-                if s.title == 'Untitled' or s.title == 'New Chat' or not s.title:
+                if s.title in ('Untitled', 'New Chat', '') or not s.title:
+                    # Stamp creation-time placeholder provenance before the
+                    # title transitions from default/empty to a title_from()
+                    # value, so the provisional title's identity survives
+                    # later edits to the first message's text.
+                    stamp_placeholder_title_provenance(s, s.messages)
                     s.title = title_from(s.messages, s.title)
                 _bg_title_inputs = _background_title_generation_inputs(s)
                 # Read token/cost usage from the agent object (if available).
