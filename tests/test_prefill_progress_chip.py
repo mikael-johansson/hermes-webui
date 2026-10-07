@@ -245,7 +245,7 @@ def test_call_stats_listener_and_render_wiring():
     f = UI_JS.index("function appendLiveLlmCallStats(")
     live = UI_JS[f:UI_JS.index("\n}", f)]
     assert "data-request-id" in live and "blocks.insertBefore(row,status)" in live
-    assert "querySelectorAll('.tool-card-row')" in live
+    assert "_liveToolKeys(blocks)" in live
     # textContent only: no HTML injection from server numbers.
     g = UI_JS.index("function _llmCallStatsRow(")
     assert "innerHTML" not in UI_JS[g:UI_JS.index("\n}", g)]
