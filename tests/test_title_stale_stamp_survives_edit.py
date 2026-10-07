@@ -291,6 +291,107 @@ def test_mark_generated_and_clear_coexist():
     assert s.title_provenance is None
 
 
+def test_sync_writer_stamps_provenance():
+    """The sync (non-streaming) chat path is the second title_from() writer
+    (routes.py _handle_chat_sync, 'Untitled'-only predicate). The extracted
+    title-derivation branch must call stamp_placeholder_title_provenance
+    before deriving the title, so a sync-path placeholder is stamped and
+    becomes eligible for regeneration — same as the streaming teardown.
+
+    The full _handle_chat_sync body needs an agent runtime, so this extracts
+    just the title-derivation branch from the live source and execs it with
+    a minimal session stub.
+    """
+    import re
+    import textwrap
+
+    src = open("api/routes.py").read()
+    m = re.search(
+        r"def _handle_chat_sync\(.*?\n(.*?)(?=\ndef )", src, re.DOTALL
+    )
+    assert m, "could not find _handle_chat_sync"
+    body = m.group(1)
+    branch = re.search(
+        r"        if s\.title == \"Untitled\":\n(.*?)(?=^        \S)",
+        body,
+        re.DOTALL | re.MULTILINE,
+    )
+    assert branch, "sync 'Untitled' title-derivation branch not found"
+    # The branch keeps the ORIGINAL 'Untitled'-only predicate.
+    assert 'if s.title == "Untitled":' in branch.group(0)
+    # The stamp is invoked before the title is derived.
+    stamp_idx = branch.group(0).find("stamp_placeholder_title_provenance(")
+    title_idx = branch.group(0).find("s.title = title_from(")
+    assert stamp_idx != -1, "sync writer must call stamp_placeholder_title_provenance"
+    assert title_idx != -1
+    assert stamp_idx < title_idx, "stamp must happen before the title is derived"
+
+    class _SyncStub:
+        def __init__(self):
+            self.title = "Untitled"
+            self.title_provenance = None
+            self.messages = [
+                {"role": "user", "content": "Synchronous path first message"},
+                {"role": "assistant", "content": "ok"},
+            ]
+        def save(self):
+            return None
+
+    s = _SyncStub()
+    ns = {
+        "s": s,
+        "title_from": title_from,
+        "stamp_placeholder_title_provenance": stamp_placeholder_title_provenance,
+    }
+    exec(textwrap.dedent(branch.group(0)), ns)
+    assert s.title == "Synchronous path first message"[:64]
+    assert s.title_provenance is not None
+    assert s.title_provenance["kind"] == "placeholder"
+    assert s.title_provenance["source_message_uid"] == _sha256(
+        "Synchronous path first message"
+    )
+    assert s.title_provenance["source_message_hash"] == _sha256(
+        "Synchronous path first message"
+    )
+
+
+def test_sync_writer_not_stamped_for_custom_title():
+    """Same extracted sync branch: a session whose title is not exactly
+    'Untitled' (the sync predicate is narrower than the streaming one)
+    must not be stamped and keeps its title."""
+    import re
+    import textwrap
+
+    src = open("api/routes.py").read()
+    m = re.search(r"def _handle_chat_sync\(.*?\n(.*?)(?=\ndef )", src, re.DOTALL)
+    branch = re.search(
+        r"        if s\.title == \"Untitled\":\n(.*?)(?=^        \S)",
+        m.group(1),
+        re.DOTALL | re.MULTILINE,
+    )
+    assert branch
+
+    class _SyncStub:
+        def __init__(self):
+            self.title = "My Custom Title"
+            self.title_provenance = None
+            self.messages = [
+                {"role": "user", "content": "Synchronous path first message"},
+            ]
+        def save(self):
+            return None
+
+    s = _SyncStub()
+    ns = {
+        "s": s,
+        "title_from": title_from,
+        "stamp_placeholder_title_provenance": stamp_placeholder_title_provenance,
+    }
+    exec(textwrap.dedent(branch.group(0)), ns)
+    assert s.title == "My Custom Title"
+    assert s.title_provenance is None
+
+
 # ── Persistence of the stamp ─────────────────────────────────────────────────
 
 

@@ -16439,6 +16439,12 @@ def handle_post(handler, parsed) -> bool:
                 # Preserve LLM-generated title flag so we don't regenerate title on duplicate.
                 llm_title_generated=getattr(session, "llm_title_generated", False),
                 manual_title=getattr(session, "manual_title", False),
+                # Carry the placeholder title-provenance stamp: the duplicate
+                # copies the same message list (same message_uid values) and
+                # the same placeholder title, so the stamp's source message is
+                # factually valid on the copy. Deepcopy — must not share the
+                # original's dict object (mutable).
+                title_provenance=copy.deepcopy(getattr(session, "title_provenance", None)),
                 # Composer draft — preserve per-session draft state.
                 composer_draft=copy.deepcopy(getattr(session, "composer_draft", None) or {}),
                 # Context engine state — preserve so the duplicate's context engine
@@ -26776,6 +26782,14 @@ def _handle_chat_sync(handler, body):
         _compact_session_image_parts_for_persistence(s)
         # Only auto-generate title when still default; preserves user renames
         if s.title == "Untitled":
+            # Same placeholder stamp as the streaming teardown site: the sync
+            # (non-streaming) path must not produce an unstuck title_from()
+            # placeholder. stamp_placeholder_title_provenance is a no-op
+            # unless the title is a default/empty value, so the 'Untitled'
+            # predicate above is the sole gate.
+            from api.session_ops import stamp_placeholder_title_provenance
+
+            stamp_placeholder_title_provenance(s, s.messages)
             s.title = title_from(s.messages, s.title)
         s.save()
     # Sync to state.db for /insights (opt-in setting)

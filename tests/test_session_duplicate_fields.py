@@ -140,6 +140,20 @@ def test_duplicate_copies_llm_title_generated():
         "Duplicate must copy llm_title_generated"
 
 
+def test_duplicate_copies_title_provenance():
+    """title_provenance (placeholder stamp) must be carried to the duplicate:
+    the duplicate copies the same message list (same message_uid values) and
+    the same placeholder title, so the stamp's source message is factually
+    valid on the copy — leaving it None would re-stick the stale-title bug
+    on forks."""
+    block, _ = _extract_duplicate_block()
+    ctor = _find_session_ctor(block)
+    assert _has_field(ctor, 'title_provenance'), \
+        "Duplicate must copy title_provenance"
+    assert _has_deepcopy_for(ctor, 'title_provenance'), \
+        "title_provenance must be deepcopied (mutable dict, no shared mutation)"
+
+
 def test_duplicate_copies_composer_draft():
     """Per-session composer draft should be preserved."""
     block, _ = _extract_duplicate_block()
@@ -485,3 +499,61 @@ def test_branch_does_not_copy_ephemeral():
         "active_stream_id should NOT be copied in branch"
     assert not _has_field(ctor, 'pending_user_message'), \
         "pending_user_message should NOT be copied in branch"
+
+
+# ── Runtime: deep-copy semantics of the carried title_provenance ────────────
+
+PROVENANCE_COPY = {
+    "kind": "placeholder",
+    "source_message_uid": "msg-runtime-1",
+    "source_message_hash": "hash-runtime-1",
+}
+
+
+def test_duplicate_title_provenance_is_independent_deepcopy():
+    """Runtime proof of the carry: the duplicate's title_provenance must be
+    a deep copy of the source's (values equal, object independent) —
+    mutating the duplicate's dict must NOT affect the source's dict. Uses
+    the same construction the duplicate ctor uses (copy.deepcopy of the
+    source's title_provenance)."""
+    import copy as _copy
+
+    from api.models import Session
+
+    src = Session(
+        session_id="dup-src",
+        title="Original title (copy)",
+        messages=[
+            {"role": "user", "content": "how do I", "message_uid": "msg-runtime-1"},
+        ],
+        title_provenance=_copy.deepcopy(PROVENANCE_COPY),
+    )
+    dup = Session(
+        session_id="dup-copy",
+        messages=_copy.deepcopy(src.messages),
+        title_provenance=_copy.deepcopy(src.title_provenance),
+    )
+    assert dup.title_provenance == src.title_provenance
+    assert dup.title_provenance is not src.title_provenance, \
+        "duplicate must own its own dict object (deepcopy, no shared mutation)"
+
+    dup.title_provenance["kind"] = "mutated"
+    dup.title_provenance["injected"] = True
+    assert src.title_provenance["kind"] == "placeholder"
+    assert "injected" not in src.title_provenance
+    assert src.title_provenance == PROVENANCE_COPY
+
+    # The stamp stays factually valid on the duplicate: it keeps the same
+    # message_uid values as the source.
+    assert dup.messages[0]["message_uid"] == src.messages[0]["message_uid"]
+    assert dup.title_provenance["source_message_uid"] == "msg-runtime-1"
+
+
+def test_branch_does_not_carry_title_provenance():
+    """Branch/compression-continuation sessions are NEW sessions (fresh
+    message slice); provenance is creation-time per session, so branch
+    must NOT carry the source's stamp (stays None)."""
+    block, _ = _extract_branch_block()
+    ctor = _find_session_ctor(block, 'branch')
+    assert not _has_field(ctor, 'title_provenance'), \
+        "Branch must NOT copy title_provenance (new session, conservative)"
