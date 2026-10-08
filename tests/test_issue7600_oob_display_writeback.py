@@ -1,20 +1,27 @@
-"""Settled writeback must extract inner steer text from typed steer rows (#7600).
+"""Settled writeback keeps the OOB steer wrapper byte-for-byte (#7600 follow-up).
 
 A mid-turn ``/steer`` is emitted as a standalone typed user row
-(``role: 'user'``, ``display_kind: 'steer'``). The surrounding
-``[OUT-OF-BAND USER MESSAGE ...] ... [/OUT-OF-BAND USER MESSAGE]`` block is
-transport-level control data. Settlement unwraps the single validated frame
-in place, preserving the user's authored steer instruction while dropping
-the wrapper.
+(``role: 'user'``, ``display_kind: 'steer'``) wrapped in
+``[OUT-OF-BAND USER MESSAGE ...] ... [/OUT-OF-BAND USER MESSAGE]``. Every
+request *during* the turn (the agent's live in-turn request) carries that
+wrapper. For the next turn's request to stay a prefix of the previous turn's
+last request (vLLM prefix-cache stable), the wrapper must survive settle
+byte-for-byte in both ``session.context_messages`` and ``session.messages``;
+it is stripped only in the display layer (``api.helpers._public_message_
+projection``), where the single validated frame is unwrapped in place to the
+user's authored steer text.
 
-Legacy tool rows and rows where markers are multiple, nested, incomplete,
-or contain ambiguous delimiters are preserved byte-for-byte.
+These tests assert the settled transcript keeps the wrapper, that the display
+projection unwraps exactly the typed steer row, and that malformed / nested /
+multiple / quoted marker occurrences degrade gracefully (preserved
+byte-for-byte).
 """
 from __future__ import annotations
 
 import copy
 import json
 
+from api.helpers import _public_message_projection
 from api.models import Session
 from api.streaming import _settle_result_messages, _unwrap_steer_row_oob_marker
 from api import streaming as _streaming
@@ -88,8 +95,8 @@ def _settle_turn_with_steer(session, monkeypatch, *, tool_content: str = "checks
     return previous
 
 
-def test_settle_unwraps_steer_row_in_place_preserving_user_text(monkeypatch):
-    """A typed steer row is unwrapped in place: inner text preserved, wrapper gone."""
+def test_settle_keeps_steer_row_wrapper_byte_for_byte(monkeypatch):
+    """A typed steer row keeps its wrapper in the settled transcript."""
     session = _session_with_prior_turn()
     steer_row = {
         "role": "user",
@@ -99,24 +106,24 @@ def test_settle_unwraps_steer_row_in_place_preserving_user_text(monkeypatch):
     }
     _settle_turn_with_steer(session, monkeypatch, steer_rows=[steer_row])
 
-    # The outer wrapper is dropped from display and context
-    assert not _contains_oob(session.messages)
-    assert not _contains_oob(session.context_messages)
+    # The wrapper survives settlement in both display and context.
+    assert _contains_oob(session.messages)
+    assert _contains_oob(session.context_messages)
 
-    # The user's inner steer text is preserved exactly
+    # The typed steer row's content is the exact wrapper byte-for-byte.
     steer_contents = [
         m.get("content")
         for m in session.messages
         if isinstance(m, dict) and m.get("display_kind") == "steer"
     ]
-    assert steer_contents == ["steer: use the staging bucket this time"]
+    assert steer_contents == [OOB_BLOCK]
 
-    # In-place mutation preserved the dictionary object identity
-    assert steer_row["content"] == "steer: use the staging bucket this time"
+    # In-place mutation preserved the dictionary object identity.
+    assert steer_row["content"] == OOB_BLOCK
 
 
-def test_settle_unwraps_list_based_content_steer_row(monkeypatch):
-    """List-based content parts on a steer row are unwrapped too."""
+def test_settle_keeps_list_based_content_steer_row_wrapper(monkeypatch):
+    """List-based content parts on a steer row keep their wrapper in the settled transcript."""
     session = _session_with_prior_turn()
     steer_row = {
         "role": "user",
@@ -126,12 +133,40 @@ def test_settle_unwraps_list_based_content_steer_row(monkeypatch):
     }
     _settle_turn_with_steer(session, monkeypatch, steer_rows=[steer_row])
 
-    assert not _contains_oob(session.messages)
-    assert not _contains_oob(session.context_messages)
-    assert steer_row["content"] == [{"type": "text", "text": "steer: also bump the timeout"}]
+    assert _contains_oob(session.messages)
+    assert _contains_oob(session.context_messages)
+    assert steer_row["content"] == [{"type": "text", "text": OOB_VARIANT}]
 
 
-def test_settle_leaves_legacy_tool_rows_alone(monkeypatch):
+def test_display_projection_unwraps_typed_steer_row():
+    """The display layer unwraps exactly the validated single steer frame to inner text."""
+    steer = {"role": "user", "display_kind": "steer", "content": OOB_BLOCK}
+    projected = _public_message_projection(steer, _enabled=False)
+    assert projected["content"] == "steer: use the staging bucket this time"
+    assert not _contains_oob(projected)
+
+    # List-based content part unwraps too.
+    steer_list = {"role": "user", "display_kind": "steer", "content": [{"type": "text", "text": OOB_VARIANT}]}
+    projected_list = _public_message_projection(steer_list, _enabled=False)
+    assert projected_list["content"] == [{"type": "text", "text": "steer: also bump the timeout"}]
+
+
+def test_display_projection_leaves_non_steer_marker_rows_alone():
+    """A normal user row quoting a full block and a tool row carrying a marker are preserved."""
+    pasted = (
+        "our bot log shows this block, is that normal?\n"
+        f"{OOB_BLOCK}\n"
+        "the docs say the gateway adds it"
+    )
+    projected_pasted = _public_message_projection({"role": "user", "content": pasted}, _enabled=False)
+    assert projected_pasted["content"] == pasted
+
+    tool = {"role": "tool", "tool_call_id": "call-9", "content": f"output\n{OOB_BLOCK}"}
+    projected_tool = _public_message_projection(tool, _enabled=False)
+    assert projected_tool["content"] == tool["content"]
+
+
+def test_settle_keeps_legacy_tool_rows_alone(monkeypatch):
     """Legacy tool rows carrying raw markers are left alone (not truncated/deleted)."""
     session = _session_with_prior_turn()
     tool_text = f"checks passed\n\n{OOB_BLOCK}"
@@ -161,7 +196,8 @@ def test_settle_preserves_malformed_nested_and_multiple_blocks_byte_for_byte():
 
 
 def test_settle_keeps_normal_user_pasted_marker_intact(monkeypatch):
-    """A normal user row that quotes a complete marker survives byte-for-byte."""
+    """A normal user row that quotes a complete marker survives byte-for-byte; the
+    steer row also keeps its wrapper in the settled transcript."""
     pasted = (
         "our bot log shows this block, is that normal?\n"
         f"{OOB_BLOCK}\n"
@@ -179,7 +215,7 @@ def test_settle_keeps_normal_user_pasted_marker_intact(monkeypatch):
     }
     _settle_turn_with_steer(session, monkeypatch, steer_rows=[steer_row])
 
-    # The normal user row still carries its quoted block intact
+    # The normal user row still carries its quoted block intact.
     assert session.messages[0]["content"] == pasted
-    # The steer row had its wrapper unwrapped
-    assert session.messages[-2]["content"] == "steer: use the staging bucket this time"
+    # The steer row keeps its wrapper in the settled transcript (display strips it).
+    assert session.messages[-2]["content"] == OOB_BLOCK

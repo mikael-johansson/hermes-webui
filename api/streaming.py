@@ -2569,14 +2569,17 @@ def _prepare_marker_clean_writeback(
     cleaned, has_verification_nudge = _clean_synthetic_control_messages_with_provenance(
         result_messages
     )
-    # Same internal-control class, second home: a consumed mid-turn /steer is
-    # appended to the turn's last tool result wrapped in
-    # [OUT-OF-BAND USER MESSAGE ...] ... [/OUT-OF-BAND USER MESSAGE]. Strip it
-    # here, on the rows both writebacks are built from, so neither
-    # session.messages (rendered verbatim) nor session.context_messages keeps
-    # the raw wrapper. Stripping the incoming rows too keeps them identity-equal
-    # to the marker-free rows persisted by earlier turns. (#7600)
-    cleaned = _strip_oob_markers_from_messages(cleaned)
+    # A consumed mid-turn /steer is persisted as a standalone typed user row
+    # (``display_kind == 'steer'``) wrapped in
+    # [OUT-OF-BAND USER MESSAGE ...] ... [/OUT-OF-BAND USER MESSAGE]. The
+    # wrapper is byte-stable across every later request of the conversation:
+    # it is present in every request while the turn runs (the model saw it) and
+    # must stay in the settled ``context_messages``/``messages`` so the next
+    # turn's request is a prefix of the previous turn's last request (vLLM
+    # prefix-cache stable). It is therefore NOT stripped here at settle time;
+    # it is stripped only in the display layer (api/helpers._public_message_
+    # projection), so the UI renders the steer's inner text without the marker.
+    # (#7600 follow-up: persist the wrapper byte-for-byte, strip for display only)
     provenance = {
         'verification_nudge_seen': has_verification_nudge,
         'active_turn_identity': copy.deepcopy(active_turn_identity),
@@ -2728,11 +2731,11 @@ def _settle_result_messages(
                 )
             ):
                 context_user[_WEBUI_TRUSTED_AGENT_INPUT_FIELD] = trusted_agent_input
-    # The merge carries earlier display rows across turns verbatim, so a row
-    # settled before this guard existed would keep its raw wrapper forever.
-    # Scrub the persisted display copy too — after the merge, so identity
-    # matching above still saw the rows unchanged. (#7600)
-    session.messages = _strip_oob_markers_from_messages(session.messages)
+    # The settled display copy keeps the OOB steer wrapper byte-for-byte (the
+    # display layer in api/helpers strips it for rendering). A row settled before
+    # this change is the only case where a persisted row could carry a marker the
+    # next-turn send path used to strip; the send path now keeps the wrapper, so
+    # the wrapper in a persisted row is the correct, stable form — no scrub.
     _annotate_media_snapshots_for_settled_messages(session.messages)
     _compact_session_image_parts_for_persistence(session)
     _advance_truncation_watermark_after_commit(session)  # #3831
@@ -7202,8 +7205,14 @@ def _sanitize_messages_for_api(
                 del sanitized['reasoning_content']
         if is_recovered:
             sanitized['_recovered'] = True  # temporary marker — stripped before return
-        if 'content' in sanitized:
-            sanitized['content'] = _strip_oob_blocks(sanitized['content'])
+        # The OOB steer wrapper is intentionally NOT stripped from the
+        # model-facing history here (#7600 follow-up). A settled steer row is
+        # persisted byte-for-byte WITH its [OUT-OF-BAND USER MESSAGE ...]
+        # wrapper (see _prepare_marker_clean_writeback), and every request while
+        # that turn ran carried the wrapper. The next turn must therefore send
+        # it too so the request stays a prefix of the previous turn's last
+        # request (vLLM prefix-cache stable). The wrapper is stripped only in
+        # the display layer (api.helpers._public_message_projection).
         if strip_native_images and 'content' in sanitized:
             sanitized['content'] = _strip_native_image_parts_from_content(sanitized.get('content'))
         if sanitized.get('role'):

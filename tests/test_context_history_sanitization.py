@@ -219,7 +219,12 @@ def test_strip_oob_blocks_list_content():
     assert not _contains_oob(cleaned)
 
 
-def test_sanitize_messages_for_api_no_oob_in_output():
+def test_sanitize_messages_for_api_preserves_oob_in_output():
+    """The send path no longer strips the OOB steer wrapper (#7600 follow-up):
+    a settled steer row is persisted byte-for-byte WITH its wrapper so the next
+    turn's request stays a prefix of the previous turn's last request (vLLM
+    prefix-cache stable). The wrapper is stripped only in the display layer, so
+    ``_sanitize_messages_for_api`` must pass it through untouched."""
     messages = [
         {"role": "user", "content": f"question\n{OOB_BLOCK}\nvisible question"},
         {
@@ -234,7 +239,10 @@ def test_sanitize_messages_for_api_no_oob_in_output():
 
     sanitized = _sanitize_messages_for_api(messages)
 
-    assert not _contains_oob(sanitized)
+    # The OOB wrapper survives the send-path sanitizer (it is a display-layer
+    # concern now, not a model-facing one).
+    assert sanitized[0]["content"] == f"question\n{OOB_BLOCK}\nvisible question"
+    assert sanitized[1]["content"] == f"answer\n{OOB_BLOCK}\nvisible answer"
     assert sanitized[0]["content"].startswith("question")
     assert "visible question" in sanitized[0]["content"]
     assert "visible answer" in sanitized[1]["content"]
@@ -267,8 +275,9 @@ def test_sanitize_messages_for_api_preserves_tool_chains():
     assert [msg["role"] for msg in sanitized] == ["user", "assistant", "tool", "assistant"]
     assert sanitized[1]["tool_calls"][0]["id"] == "call-1"
     assert sanitized[2]["tool_call_id"] == "call-1"
+    # The OOB wrapper rides through the tool row untouched (display-layer concern).
+    assert sanitized[2]["content"] == f"tool output\n{OOB_BLOCK}\nresult"
     assert "result" in sanitized[2]["content"]
-    assert not _contains_oob(sanitized)
 
 
 def test_sanitize_messages_drops_empty_tool_calls_array():

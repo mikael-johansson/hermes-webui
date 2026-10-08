@@ -1636,7 +1636,16 @@ def scrub_internal_replay_fields(
 
 
 def _public_message_projection(message, *, _enabled: bool, _active_turn_token=None):
-    """Return one public transcript message without internal replay fields."""
+    """Return one public transcript message without internal replay fields.
+
+    Also strips the OOB steer wrapper for display only: a settled steer row is
+    persisted byte-for-byte (wrapper included) so the next turn's model request
+    stays a prefix of the previous turn's, but the UI renders the steer's inner
+    text without the ``[OUT-OF-BAND USER MESSAGE ...]`` marker. The unwrap runs
+    on the already-copied projection (never the persisted row) and is
+    single-sourced in ``api.streaming._unwrap_steer_row_oob_marker`` (imported
+    lazily to avoid the streaming->helpers module-load cycle).
+    """
     is_active = (
         isinstance(message, dict)
         and message.get("role") == "user"
@@ -1646,6 +1655,13 @@ def _public_message_projection(message, *, _enabled: bool, _active_turn_token=No
     message = scrub_internal_replay_fields([message], message_records=True)[0]
     if not isinstance(message, dict):
         return _redact_value(message, _enabled=_enabled)
+    # Display-only OOB steer unwrap (persisted rows keep the wrapper).
+    try:
+        from api.streaming import _unwrap_steer_row_oob_marker
+
+        _unwrap_steer_row_oob_marker(message)
+    except Exception:
+        logger.debug("Display-layer OOB steer unwrap failed", exc_info=True)
     item = {}
     allow_native_image = message.get("role") == "user"
     for key, value in message.items():
